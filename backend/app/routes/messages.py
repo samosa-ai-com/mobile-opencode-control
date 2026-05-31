@@ -3,6 +3,7 @@ import json
 
 import requests
 from flask import Response, jsonify, request, stream_with_context
+from werkzeug.exceptions import ClientDisconnected
 
 from ..auth import auth_required
 from ..db import db
@@ -328,14 +329,18 @@ def stream_project_events(project_id: int):
                 params={"directory": project.path},
                 headers=opencode_client.event_headers,
                 stream=True,
-                timeout=600,
+                timeout=120,
             ) as upstream:
                 upstream.raise_for_status()
+                upstream.raw.settimeout(30)
                 event_lines: list[str] = []
 
                 for line in upstream.iter_lines(decode_unicode=True):
                     if line is None:
                         continue
+
+                    if request.is_disconnected():
+                        return
 
                     normalized_line = line.rstrip("\n")
                     if not normalized_line:
@@ -358,14 +363,19 @@ def stream_project_events(project_id: int):
                     if normalized_line.startswith(":"):
                         continue
                     event_lines.append(normalized_line)
+        except GeneratorExit:
+            return
+        except (ClientDisconnected, OSError):
+            return
         except Exception:
-            app.logger.exception(
-                "Failed to stream project events for project %s", project.id
-            )
-            error_payload = json.dumps(
-                {"sessionId": session_id, "error": "Stream connection failed"}
-            )
-            yield f"event: error\ndata: {error_payload}\n\n"
+            if not request.is_disconnected():
+                app.logger.exception(
+                    "Failed to stream project events for project %s", project.id
+                )
+                error_payload = json.dumps(
+                    {"sessionId": session_id, "error": "Stream connection failed"}
+                )
+                yield f"event: error\ndata: {error_payload}\n\n"
 
     return Response(
         stream_with_context(_stream()),
@@ -388,14 +398,18 @@ def stream_global_project_events():
                 f"{opencode_client.base_url}/global/sync-event",
                 headers=opencode_client.event_headers,
                 stream=True,
-                timeout=600,
+                timeout=120,
             ) as upstream:
                 upstream.raise_for_status()
+                upstream.raw.settimeout(30)
                 event_lines: list[str] = []
 
                 for line in upstream.iter_lines(decode_unicode=True):
                     if line is None:
                         continue
+
+                    if request.is_disconnected():
+                        return
 
                     normalized_line = line.rstrip("\n")
                     if not normalized_line:
@@ -408,10 +422,15 @@ def stream_global_project_events():
                     if normalized_line.startswith(":"):
                         continue
                     event_lines.append(normalized_line)
+        except GeneratorExit:
+            return
+        except (ClientDisconnected, OSError):
+            return
         except Exception:
-            app.logger.exception("Failed to stream global project events")
-            error_payload = json.dumps({"error": "Stream connection failed"})
-            yield f"event: error\ndata: {error_payload}\n\n"
+            if not request.is_disconnected():
+                app.logger.exception("Failed to stream global project events")
+                error_payload = json.dumps({"error": "Stream connection failed"})
+                yield f"event: error\ndata: {error_payload}\n\n"
 
     return Response(
         stream_with_context(_stream()),
