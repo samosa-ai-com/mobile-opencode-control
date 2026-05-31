@@ -3568,18 +3568,16 @@ async function loadDiff(projectId: string) {
 
     try {
       const parsed = parseSlashCommand(text);
-      const result = parsed
-        ? await runCommand(activeProjectId, parsed.command, parsed.argumentsList, activeSessionId)
-        : await sendMessage(activeProjectId, text, activeSessionId);
-
       if (parsed) {
         // Command path — backend returns the result message synchronously
+        const result = await runCommand(activeProjectId, parsed.command, parsed.argumentsList, activeSessionId);
         setMessages((current) => [
           ...current.filter((m) => !m.id.startsWith("local-")),
           result.message,
         ]);
       } else {
         // Regular message path — response arrives via SSE events
+        const result = await sendMessage(activeProjectId, text, activeSessionId);
         awaitingFinalReplyNotificationByChatRef.current[`${activeProjectId}:${result.sessionId}`] = true;
         setMessages((current) => current.filter((m) => !m.id.startsWith("local-")));
       }

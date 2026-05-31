@@ -174,6 +174,8 @@ def create_project():
         return jsonify({"error": "Project path is required"}), 400
 
     normalized_path = _normalize_project_path(path)
+    if normalized_path == "/":
+        return jsonify({"error": "Project path cannot be /"}), 400
 
     if not os.path.isdir(normalized_path):
         try:
