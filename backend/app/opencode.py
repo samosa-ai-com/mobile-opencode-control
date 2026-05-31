@@ -14,6 +14,10 @@ class OpenCodeClient:
             )
             self._auth_header = f"Basic {token}"
 
+    @property
+    def auth_header(self) -> str | None:
+        return self._auth_header
+
     def _headers(self) -> dict:
         headers = {"Accept": "application/json"}
         if self._auth_header:

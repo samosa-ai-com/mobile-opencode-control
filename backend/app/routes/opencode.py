@@ -64,3 +64,19 @@ def opencode_commands():
         return jsonify({"commands": normalized})
     except Exception as exc:
         return jsonify({"error": f"Failed to load commands: {exc}"}), 502
+
+
+@api_bp.get("/opencode/sse-info")
+@auth_required
+def opencode_sse_info():
+    try:
+        data = opencode_client.health()
+        base_url = settings.opencode_base_url
+        auth_header = opencode_client.auth_header
+        return jsonify({
+            "url": base_url,
+            "auth": auth_header,
+            "healthy": True,
+        })
+    except Exception as exc:
+        return jsonify({"healthy": False, "error": str(exc)}), 502

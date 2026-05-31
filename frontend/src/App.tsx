@@ -2357,11 +2357,16 @@ async function loadDiff(projectId: string) {
       eventSourceRef.current = stream;
 
       stream.onopen = () => {
+        const wasReconnect = streamReconnectAttemptRef.current > 0;
         streamReconnectAttemptRef.current = 0;
         setStreamStatus("live");
         setReconnectStartedAtMs(null);
         setReconnectAttemptCount(0);
         addTelemetryMarker("stream.chat.open", { projectId: activeProjectId });
+        // After a reconnection, reload messages to recover events lost during the gap
+        if (wasReconnect && activeProjectId && activeSessionId) {
+          void loadMessages(activeProjectId, { silent: true, sessionId: activeSessionId });
+        }
       };
 
       stream.onmessage = (event) => {
