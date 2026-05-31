@@ -367,7 +367,6 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const streamStatusRef = useRef(streamStatus);
   streamStatusRef.current = streamStatus;
   const lastAssistantMessageIdBySessionRef = useRef<Record<string, string>>({});
-  const textDeltaScrollRef = useRef(0);
 
   function addTelemetryMarker(event: string, payload?: Record<string, unknown>) {
     const marker: TelemetryMarker = {
@@ -2420,7 +2419,6 @@ async function loadDiff(projectId: string) {
                 .join("\n").trim();
               const next = [...current];
               next[msgIndex] = { ...existing, text: allText, parts: updatedParts };
-              textDeltaScrollRef.current += 1;
               return next;
             });
           }
@@ -2865,17 +2863,6 @@ async function loadDiff(projectId: string) {
     pendingScrollAnchorRef.current = null;
   }, [isChatNearBottom, renderedTimelineEntries]);
 
-  useLayoutEffect(() => {
-    if (!isChatNearBottom) {
-      return;
-    }
-    const body = chatBodyRef.current;
-    if (!body) {
-      return;
-    }
-    body.scrollTop = Math.max(0, body.scrollHeight - body.clientHeight);
-  }, [isChatNearBottom, textDeltaScrollRef.current]);
-
   useEffect(() => {
     const body = chatBodyRef.current;
     if (pendingQuestions.length > 0 && prevQuestionCountRef.current === 0 && body) {
@@ -2884,7 +2871,7 @@ async function loadDiff(projectId: string) {
         const cardRect = card.getBoundingClientRect();
         const bodyRect = body.getBoundingClientRect();
         const offsetTop = cardRect.top - bodyRect.top + body.scrollTop - 24;
-        body.scrollTo({ top: Math.max(0, offsetTop), behavior: "smooth" });
+        body.scrollTo({ top: Math.max(0, offsetTop), behavior: "auto" });
       }
       const q = pendingQuestions[pendingQuestions.length - 1];
       const text = q.questions?.[0]?.question || "Agent has a question for you";
@@ -3631,7 +3618,7 @@ async function loadDiff(projectId: string) {
 
   function handleChatScroll(event: UIEvent<HTMLElement>) {
     const body = event.currentTarget;
-    const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 180;
+    const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
     setIsChatNearBottom(nearBottom);
 
     if (!nearBottom || !activeChatKey || timelineEntries.length === 0) {
