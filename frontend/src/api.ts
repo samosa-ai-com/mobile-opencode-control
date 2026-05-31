@@ -141,7 +141,7 @@ export async function fetchMessages(projectId: string, sessionId?: string): Prom
 
 export async function sendMessage(projectId: string, text: string, sessionId?: string | null): Promise<{
   sessionId: string;
-  message: ChatMessage;
+  ok: boolean;
 }> {
   return request(`/api/projects/${projectId}/messages`, {
     method: "POST",

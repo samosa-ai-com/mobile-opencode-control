@@ -23,6 +23,188 @@ export function extractJsonFromEventLines(eventLines: string[]): Record<string, 
   }
 }
 
+
+function classifyByTypeString(result: StreamEventClassification, eventType: string): void {
+  result.rawEventType = eventType;
+  if (eventType === "heartbeat") {
+    result.isHeartbeat = true;
+  } else if (eventType.includes("permission")) {
+    result.hasApprovalUpdate = true;
+  } else if (eventType === "question.asked" || eventType === "question.replied" || eventType === "question.rejected") {
+    result.hasQuestionUpdate = true;
+  } else if (eventType === "message.part.delta") {
+    result.hasPartDelta = true;
+  } else if (eventType === "message.part.updated") {
+    result.hasPartUpdate = true;
+  } else if (eventType === "message.part.removed") {
+    result.hasPartRemove = true;
+  } else if (eventType === "message.updated") {
+    result.hasMessageUpdate = true;
+  } else if (eventType === "message.removed") {
+    result.hasMessageDelete = true;
+  } else if (eventType === "todo.updated") {
+    result.hasTodoUpdate = true;
+  } else if (eventType === "session.diff") {
+    result.hasDiffUpdate = true;
+  } else if (eventType === "session.status" || eventType === "session.idle" || eventType === "session.compacted") {
+    result.hasSessionUpdate = true;
+  } else if (eventType.startsWith("session.next.compaction.")) {
+    result.hasCompactionUpdate = true;
+  }
+}
+
+export function classifyRawEvent(eventLines: string[]): StreamEventClassification {
+  const result: StreamEventClassification = {
+    hasMessageUpdate: false, hasQuestionUpdate: false, hasApprovalUpdate: false,
+    hasPartDelta: false, hasPartUpdate: false, hasPartRemove: false,
+    hasCompactionUpdate: false, hasSessionUpdate: false, hasTodoUpdate: false,
+    hasDiffUpdate: false, hasMessageDelete: false, isHeartbeat: false,
+    rawEventType: null,
+  };
+
+  for (const line of eventLines) {
+    if (!line.startsWith("event: ")) continue;
+    classifyByTypeString(result, line.slice(7).trim());
+  }
+
+  if (!result.rawEventType) {
+    const payload = extractDataJsonFromRawEvent(eventLines);
+    if (payload) {
+      // Unwrap GlobalEvent envelope: { directory, payload: { type, properties } }
+      const inner = payload.payload as Record<string, unknown> | undefined;
+      const eventData = (inner && typeof inner.type === "string") ? inner : payload;
+      if (typeof eventData.type === "string") {
+        classifyByTypeString(result, eventData.type.toLowerCase());
+      }
+    }
+  }
+
+  return result;
+}
+
+
+export function extractDataJsonFromRawEvent(eventLines: string[]): Record<string, unknown> | null {
+  const dataLines = eventLines
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim())
+    .filter(Boolean);
+
+  if (dataLines.length === 0) return null;
+
+  try {
+    return JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+
+export function parseApprovalFromEventLines(eventLines: string[]) {
+  try {
+    const payload = extractDataJsonFromRawEvent(eventLines);
+    if (!payload) return { request: null, resolvedPermissionId: null };
+
+    const inner = (payload.payload as Record<string, unknown>) || payload;
+    const typeValue = String(inner.type || "").toLowerCase();
+    if (!typeValue.includes("permission")) {
+      return { request: null, resolvedPermissionId: null };
+    }
+    const properties =
+      inner.properties && typeof inner.properties === "object"
+        ? (inner.properties as Record<string, unknown>)
+        : inner;
+    const permissionId = findPermissionId(properties);
+    if (!permissionId) return { request: null, resolvedPermissionId: null };
+    const resolved = isPermissionResolved(properties);
+    if (resolved) {
+      return { request: null, resolvedPermissionId: permissionId };
+    }
+    return {
+      request: {
+        permissionId,
+        title: "Permission requested",
+        details: JSON.stringify(properties),
+        createdAt: new Date().toISOString(),
+      },
+      resolvedPermissionId: null,
+    };
+  } catch {
+    return { request: null, resolvedPermissionId: null };
+  }
+}
+
+
+export function parseQuestionFromEventLines(eventLines: string[]) {
+  try {
+    const payload = extractDataJsonFromRawEvent(eventLines);
+    if (!payload) return { request: null, resolvedQuestionId: null };
+
+    const inner = (payload.payload as Record<string, unknown>) || payload;
+    const typeValue = String(inner.type || "").toLowerCase();
+    const properties =
+      inner.properties && typeof inner.properties === "object"
+        ? (inner.properties as Record<string, unknown>)
+        : inner;
+
+    if (typeValue === "question.asked") {
+      const id = typeof properties.id === "string" ? properties.id : null;
+      const sessionID =
+        typeof properties.sessionID === "string"
+          ? properties.sessionID
+          : typeof properties.sessionId === "string"
+            ? properties.sessionId
+            : null;
+      const questions = Array.isArray(properties.questions) ? properties.questions : null;
+      if (!id || !sessionID || !questions || questions.length === 0) {
+        return { request: null, resolvedQuestionId: null };
+      }
+      return {
+        request: {
+          id,
+          sessionID,
+          questions: questions as QuestionRequest["questions"],
+          tool: properties.tool && typeof properties.tool === "object" ? (properties.tool as QuestionRequest["tool"]) : undefined,
+        },
+        resolvedQuestionId: null,
+      };
+    }
+
+    if (typeValue === "question.replied" || typeValue === "question.rejected") {
+      const requestId =
+        typeof properties.requestID === "string"
+          ? properties.requestID
+          : typeof properties.requestId === "string"
+            ? properties.requestId
+            : typeof properties.id === "string"
+              ? properties.id
+              : null;
+      return { request: null, resolvedQuestionId: requestId };
+    }
+  } catch {
+    // ignore malformed events
+  }
+
+  return { request: null, resolvedQuestionId: null };
+}
+
+
+export function eventMatchesSession(eventLines: string[], sessionID: string): boolean {
+  const payload = extractDataJsonFromRawEvent(eventLines);
+  if (!payload) return true;
+
+  const inner = payload.payload as Record<string, unknown> | undefined;
+  const target = inner && typeof inner.type === "string" ? inner : payload;
+  const properties = target.properties as Record<string, unknown> | undefined;
+  if (!properties) return true;
+
+  const sid =
+    (typeof properties.sessionID === "string" && properties.sessionID) ||
+    (typeof properties.sessionId === "string" && properties.sessionId) ||
+    null;
+
+  return sid === null || sid === sessionID;
+}
+
 export function findPermissionId(value: unknown): string | null {
   if (typeof value === "string") {
     const normalized = value.trim();
@@ -103,7 +285,6 @@ export function parseApprovalFromStreamData(data: string): {
       return { request: null, resolvedPermissionId: null };
     }
 
-    // Unwrap GlobalEvent envelope
     const inner = (payload.payload as Record<string, unknown>) || payload;
 
     const typeValue = String(inner.type || "").toLowerCase();
@@ -153,7 +334,6 @@ export function parseQuestionFromStreamData(data: string): {
       return { request: null, resolvedQuestionId: null };
     }
 
-    // Unwrap GlobalEvent envelope
     const inner = (payload.payload as Record<string, unknown>) || payload;
 
     const typeValue = String(inner.type || "").toLowerCase();
@@ -323,6 +503,7 @@ export function classifyStreamEvent(data: string): StreamEventClassification {
 
   return result;
 }
+
 
 export type MessagePartPayload = {
   sessionID: string | null;

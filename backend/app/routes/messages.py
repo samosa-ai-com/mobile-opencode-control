@@ -95,10 +95,9 @@ def send_project_message(project_id: int):
         else:
             session_id = _ensure_project_session(project, opencode_client)
         runtime_selection = _get_project_runtime_selection(project.id)
-        project.session_status = "running"
         db.session.commit()
 
-        response_message = opencode_client.send_message(
+        opencode_client.send_message_async(
             session_id=session_id,
             directory=project.path,
             text=text,
@@ -106,20 +105,23 @@ def send_project_message(project_id: int):
             agent=runtime_selection["agent"],
         )
 
-        normalized = _message_to_dict(response_message)
-        project.last_message_preview = normalized.get("text") or text[:180]
+        # Check if a newer session appeared (e.g., from TUI creating one concurrently)
+        latest_session_id = _latest_project_session(project, opencode_client)
+        if latest_session_id and latest_session_id != session_id:
+            session_id = latest_session_id
+            project.last_session_id = latest_session_id
+
+        project.last_message_preview = text[:180]
         project.last_activity_at = _utc_now()
-        project.session_status = "idle"
         db.session.commit()
     except Exception as exc:
-        project.session_status = "error"
         db.session.commit()
         return _bad_gateway("Failed to send message", exc)
 
     return jsonify(
         {
             "sessionId": session_id,
-            "message": normalized,
+            "ok": True,
         }
     )
 
@@ -354,8 +356,6 @@ def stream_project_events(project_id: int):
                         continue
 
                     if normalized_line.startswith(":"):
-                        # Forward SSE comment heartbeats to keep connection alive
-                        yield f"{normalized_line}\n"
                         continue
                     event_lines.append(normalized_line)
         except Exception:

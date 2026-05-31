@@ -46,10 +46,10 @@ export function getManualInstallMessage() {
 }
 
 export function nextReconnectDelayMs(attempt: number): number {
-  const baseDelay = 1000;
-  const capDelay = 15000;
+  const baseDelay = 500;
+  const capDelay = 10000;
   const exp = Math.min(capDelay, baseDelay * 2 ** attempt);
-  const jitter = Math.floor(Math.random() * 350);
+  const jitter = Math.floor(Math.random() * 250);
   return exp + jitter;
 }
 

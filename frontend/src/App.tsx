@@ -83,7 +83,7 @@ import { formatCompactSessionId, formatElapsedShort, formatSessionOptionLabel, f
 import { buildGroupedTimelineEntries, buildMessageStableKey, getNonTextParts, timelineEventToTaskRun } from "./utils/messageUtils";
 import { buildProjectPathFromRoot, extractRootFromProjectPath, getSuggestedProjectRoot, normalizeProjectRootPath, projectInitials } from "./utils/projectUtils";
 import { toDateInputPartsInTimezone, toDateTimeInputValueInTimezone, toIsoInTimezone } from "./utils/taskUtils";
-import { parseApprovalFromStreamData, parseQuestionFromStreamData, classifyStreamEvent, extractMessageFromEvent, extractMessagePartText, extractPartFromEvent, extractPartRemovalFromEvent, extractDiffFromEvent, extractSessionStatusFromEvent } from "./utils/streamUtils";
+import { parseApprovalFromEventLines, parseQuestionFromEventLines, classifyRawEvent, extractMessageFromEvent, extractMessagePartText, extractPartFromEvent, extractPartRemovalFromEvent, extractDiffFromEvent, extractSessionStatusFromEvent } from "./utils/streamUtils";
 import { buildInitialQuestionDraft, buildQuestionReplyAnswers, getManualInstallMessage, inferTelemetryCategory, markerTimeWindowMs, nextReconnectDelayMs, parseSlashCommand, removeQuestionFromList, resolveDevFixtureMode, schedulerHeartbeatState, scrollEntryIntoView } from "./utils/miscUtils";
 import { LoginView } from "./components/auth/LoginView";
 import { AgentActivityCard } from "./components/chat/AgentActivityCard";
@@ -340,6 +340,7 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaChunksRef = useRef<BlobPart[]>([]);
   const prevQuestionCountRef = useRef(0);
+  const hasSelectedProjectRef = useRef(false);
   const speakingAudioRef = useRef<HTMLAudioElement | null>(null);
   const speakingUrlRef = useRef<string | null>(null);
   const messageLoadRequestRef = useRef(0);
@@ -349,6 +350,9 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const lastFinalAssistantMessageIdByChatRef = useRef<Record<string, string>>({});
   const awaitingFinalReplyNotificationByChatRef = useRef<Record<string, boolean>>({});
   const notificationDebounceTimerRef = useRef<number | null>(null);
+  const idleDebounceTimerRef = useRef<number | null>(null);
+  const lastBusyReceivedAtRef = useRef(0);
+  const silenceTimerRef = useRef<number | null>(null);
   const pendingNotificationDataRef = useRef<{
     chatKey: string;
     projectName: string;
@@ -363,11 +367,9 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const sessionLoadRequestRef = useRef(0);
   const projectFilePreviewRequestRef = useRef(0);
   const projectFileLoadGenerationRef = useRef(0);
-  const heartbeatTimerRef = useRef<number | null>(null);
   const streamStatusRef = useRef(streamStatus);
   streamStatusRef.current = streamStatus;
   const lastAssistantMessageIdBySessionRef = useRef<Record<string, string>>({});
-  const textDeltaScrollRef = useRef(0);
 
   function addTelemetryMarker(event: string, payload?: Record<string, unknown>) {
     const marker: TelemetryMarker = {
@@ -994,7 +996,13 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
     }
 
     if (!activeProjectId) {
-      setMobileProjectListOpen(true);
+      // Only auto-open project list if user has never had a selected project
+      // (prevents redirect during reconnection or transient null states)
+      if (!hasSelectedProjectRef.current) {
+        setMobileProjectListOpen(true);
+      }
+    } else {
+      hasSelectedProjectRef.current = true;
     }
   }, [activeProjectId, isMobileViewport]);
 
@@ -1353,6 +1361,10 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
       return;
     }
     if (hasStreamingActivity) {
+      return;
+    }
+    // Don't race against SSE busy handler — wait 3s after last busy before switching to send
+    if (Date.now() - lastBusyReceivedAtRef.current < 3000) {
       return;
     }
     setRunIntentActive(false);
@@ -2292,19 +2304,13 @@ async function loadDiff(projectId: string) {
         window.clearTimeout(streamReconnectTimerRef.current);
         streamReconnectTimerRef.current = null;
       }
-      if (heartbeatTimerRef.current !== null) {
-        window.clearTimeout(heartbeatTimerRef.current);
-        heartbeatTimerRef.current = null;
-      }
       return;
     }
 
     let cancelled = false;
 
     const connect = () => {
-      if (cancelled) {
-        return;
-      }
+      if (cancelled) return;
 
       setStreamStatus("connecting");
       const stream = new EventSource(`/api/projects/${activeProjectId}/stream`, {
@@ -2321,25 +2327,21 @@ async function loadDiff(projectId: string) {
       };
 
       stream.onmessage = (event) => {
-        const classification = classifyStreamEvent(event.data);
-
-        if (classification.isHeartbeat) {
-          if (heartbeatTimerRef.current !== null) {
-            window.clearTimeout(heartbeatTimerRef.current);
-          }
-          heartbeatTimerRef.current = window.setTimeout(() => {
-            if (streamStatusRef.current === "live" && eventSourceRef.current) {
-              addTelemetryMarker("stream.heartbeat.stale", { projectId: activeProjectId });
-              eventSourceRef.current.close();
-              eventSourceRef.current = null;
-              setStreamStatus("reconnecting");
-              setReconnectStartedAtMs(Date.now());
-            }
-          }, 20000);
-          return;
+        // Reset silence timeout — any event means the connection is alive
+        if (silenceTimerRef.current !== null) {
+          window.clearTimeout(silenceTimerRef.current);
         }
+        silenceTimerRef.current = window.setTimeout(() => {
+          silenceTimerRef.current = null;
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close();
+            eventSourceRef.current = null;
+          }
+          setStreamStatus("reconnecting");
+          setReconnectStartedAtMs(Date.now());
+        }, 30000);
 
-        // Parse event lines from the SSE wrapper
+        // Parse backend wrapper: data: {"sessionId": "...", "event": ["event: ...", "data: ..."]}
         const eventLines = ((): string[] => {
           try {
             const wrapper = JSON.parse(event.data) as { event?: string[] };
@@ -2349,8 +2351,13 @@ async function loadDiff(projectId: string) {
           }
         })();
 
+        if (eventLines.length === 0) return;
+
+        const classification = classifyRawEvent(eventLines);
+        if (classification.isHeartbeat) return;
+
         // --- Approvals ---
-        const parsed = parseApprovalFromStreamData(event.data);
+        const parsed = parseApprovalFromEventLines(eventLines);
         if (parsed.request) {
           setPendingApprovals((current) => {
             if (current.some((item) => item.permissionId === parsed.request?.permissionId)) {
@@ -2366,7 +2373,7 @@ async function loadDiff(projectId: string) {
         }
 
         // --- Questions ---
-        const parsedQuestion = parseQuestionFromStreamData(event.data);
+        const parsedQuestion = parseQuestionFromEventLines(eventLines);
         if (parsedQuestion.request && parsedQuestion.request.sessionID === activeSessionId) {
           setPendingQuestions((current) => {
             if (current.some((item) => item.id === parsedQuestion.request?.id)) {
@@ -2393,7 +2400,7 @@ async function loadDiff(projectId: string) {
           });
         }
 
-        // --- Text delta (message.part.delta) — inline incremental update ---
+        // --- Text delta ---
         if (classification.hasPartDelta) {
           const partData = extractMessagePartText(eventLines);
           if (partData && partData.text != null && partData.partID && (partData.messageID || activeSessionId)) {
@@ -2401,8 +2408,15 @@ async function loadDiff(projectId: string) {
             if (!targetMsgId) return;
             setMessages((current) => {
               const msgIndex = current.findIndex((m) => m.id === targetMsgId);
-              if (msgIndex < 0) return current;
-
+              if (msgIndex < 0) {
+                return [...current, {
+                  id: targetMsgId,
+                  role: "assistant",
+                  createdAt: new Date().toISOString(),
+                  text: partData.text || "",
+                  parts: partData.text ? [{ type: "text", id: partData.partID, text: partData.text }] : [],
+                }];
+              }
               const existing = current[msgIndex];
               const updatedParts = [...existing.parts];
               const textPartIndex = updatedParts.findIndex(
@@ -2420,13 +2434,12 @@ async function loadDiff(projectId: string) {
                 .join("\n").trim();
               const next = [...current];
               next[msgIndex] = { ...existing, text: allText, parts: updatedParts };
-              textDeltaScrollRef.current += 1;
               return next;
             });
           }
         }
 
-        // --- Part update (message.part.updated) — inline full part ---
+        // --- Part update ---
         if (classification.hasPartUpdate) {
           const extracted = extractPartFromEvent(eventLines);
           if (extracted && extracted.part) {
@@ -2437,7 +2450,6 @@ async function loadDiff(projectId: string) {
               setMessages((current) => {
                 const msgIndex = current.findIndex((m) => m.id === msgID);
                 if (msgIndex < 0) return current;
-
                 const existing = current[msgIndex];
                 const updatedParts = [...existing.parts];
                 const existingIdx = updatedParts.findIndex(
@@ -2456,42 +2468,33 @@ async function loadDiff(projectId: string) {
           }
         }
 
+        // --- Part remove ---
         if (classification.hasPartRemove) {
           const extracted = extractPartRemovalFromEvent(eventLines);
           if (extracted?.messageID && extracted.partID) {
             setMessages((current) => {
               const msgIndex = current.findIndex((m) => m.id === extracted.messageID);
               if (msgIndex < 0) return current;
-
               const existing = current[msgIndex];
               const isPartToRemove = (part: ChatMessage["parts"][number]) =>
-                typeof part === "object" &&
-                part !== null &&
-                (part as Record<string, unknown>).id === extracted.partID;
+                typeof part === "object" && part !== null && (part as Record<string, unknown>).id === extracted.partID;
               const updatedParts = existing.parts.filter((part) => !isPartToRemove(part));
               if (updatedParts.length === existing.parts.length) return current;
-
               const next = [...current];
               next[msgIndex] = {
                 ...existing,
                 parts: updatedParts,
                 text: updatedParts
-                  .filter(
-                    (part) =>
-                      typeof part === "object" &&
-                      part !== null &&
-                      (part as Record<string, unknown>).type === "text"
-                  )
-                  .map((part) => (part as Record<string, string>).text || "")
-                  .join("\n")
-                  .trim(),
+                  .filter((p) => typeof p === "object" && p !== null && (p as Record<string, unknown>).type === "text")
+                  .map((p) => (p as Record<string, string>).text || "")
+                  .join("\n").trim(),
               };
               return next;
             });
           }
         }
 
-        // --- Message update (message.updated) — inline upsert ---
+        // --- Message update ---
         if (classification.hasMessageUpdate) {
           const info = extractMessageFromEvent(eventLines);
           if (info && typeof info.id === "string" && typeof info.role === "string") {
@@ -2500,17 +2503,9 @@ async function loadDiff(projectId: string) {
             setMessages((current) => {
               const existingIdx = current.findIndex((m) => m.id === infoId);
               if (existingIdx >= 0) {
-                const freshParts = Array.isArray(info.parts) ? info.parts as ChatMessage["parts"] : undefined;
-                const freshText = typeof info.text === "string" ? info.text : undefined;
-                const next = [...current];
-                next[existingIdx] = {
-                  ...current[existingIdx],
-                  ...(freshParts ? { parts: freshParts } : {}),
-                  ...(freshText !== undefined ? { text: freshText } : {}),
-                };
-                return next;
+                // Don't update text or parts — message.part.updated/delta already built them
+                return current;
               }
-              // New message — validate required fields before casting
               const msg = {
                 id: infoId,
                 role: infoRole,
@@ -2539,12 +2534,30 @@ async function loadDiff(projectId: string) {
           if (statusData && statusData.status) {
             const statusType = String((statusData.status as Record<string, unknown>).type || "");
             if (statusType === "idle") {
-              void loadMessages(activeProjectId, { silent: true });
+              // Debounce 2s before switching to send + soft refresh
+              // Prevents toggling between messages in plan mode
+              if (idleDebounceTimerRef.current !== null) {
+                window.clearTimeout(idleDebounceTimerRef.current);
+              }
+              idleDebounceTimerRef.current = window.setTimeout(() => {
+                idleDebounceTimerRef.current = null;
+                setRunIntentActive(false);
+                if (activeProjectId && activeSessionId) {
+                  void loadMessages(activeProjectId, { silent: true, sessionId: activeSessionId });
+                }
+              }, 2000);
+            } else if (statusType === "busy") {
+              lastBusyReceivedAtRef.current = Date.now();
+              // Cancel idle debounce if activity resumes
+              if (idleDebounceTimerRef.current !== null) {
+                window.clearTimeout(idleDebounceTimerRef.current);
+                idleDebounceTimerRef.current = null;
+              }
+              setRunIntentActive(true);
             }
           }
         }
 
-        // Full refresh only for compaction or message deletion (structural changes)
         const needsFullRefresh = classification.hasCompactionUpdate || classification.hasMessageDelete;
         if (needsFullRefresh) {
           scheduleStreamRefresh(activeProjectId);
@@ -2552,9 +2565,7 @@ async function loadDiff(projectId: string) {
       };
 
       stream.onerror = () => {
-        if (cancelled) {
-          return;
-        }
+        if (cancelled) return;
 
         stream.close();
         if (eventSourceRef.current === stream) {
@@ -2583,9 +2594,13 @@ async function loadDiff(projectId: string) {
         window.clearTimeout(streamReconnectTimerRef.current);
         streamReconnectTimerRef.current = null;
       }
-      if (heartbeatTimerRef.current !== null) {
-        window.clearTimeout(heartbeatTimerRef.current);
-        heartbeatTimerRef.current = null;
+      if (idleDebounceTimerRef.current !== null) {
+        window.clearTimeout(idleDebounceTimerRef.current);
+        idleDebounceTimerRef.current = null;
+      }
+      if (silenceTimerRef.current !== null) {
+        window.clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
       }
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
@@ -2865,17 +2880,6 @@ async function loadDiff(projectId: string) {
     pendingScrollAnchorRef.current = null;
   }, [isChatNearBottom, renderedTimelineEntries]);
 
-  useLayoutEffect(() => {
-    if (!isChatNearBottom) {
-      return;
-    }
-    const body = chatBodyRef.current;
-    if (!body) {
-      return;
-    }
-    body.scrollTop = Math.max(0, body.scrollHeight - body.clientHeight);
-  }, [isChatNearBottom, textDeltaScrollRef.current]);
-
   useEffect(() => {
     const body = chatBodyRef.current;
     if (pendingQuestions.length > 0 && prevQuestionCountRef.current === 0 && body) {
@@ -2884,7 +2888,7 @@ async function loadDiff(projectId: string) {
         const cardRect = card.getBoundingClientRect();
         const bodyRect = body.getBoundingClientRect();
         const offsetTop = cardRect.top - bodyRect.top + body.scrollTop - 24;
-        body.scrollTo({ top: Math.max(0, offsetTop), behavior: "smooth" });
+        body.scrollTo({ top: Math.max(0, offsetTop), behavior: "auto" });
       }
       const q = pendingQuestions[pendingQuestions.length - 1];
       const text = q.questions?.[0]?.question || "Agent has a question for you";
@@ -3564,18 +3568,20 @@ async function loadDiff(projectId: string) {
 
     try {
       const parsed = parseSlashCommand(text);
-      const result = parsed
-        ? await runCommand(activeProjectId, parsed.command, parsed.argumentsList, activeSessionId)
-        : await sendMessage(activeProjectId, text, activeSessionId);
-
-      if (!parsed) {
+      if (parsed) {
+        // Command path — backend returns the result message synchronously
+        const result = await runCommand(activeProjectId, parsed.command, parsed.argumentsList, activeSessionId);
+        setMessages((current) => [
+          ...current.filter((m) => !m.id.startsWith("local-")),
+          result.message,
+        ]);
+      } else {
+        // Regular message path — response arrives via SSE events
+        const result = await sendMessage(activeProjectId, text, activeSessionId);
         awaitingFinalReplyNotificationByChatRef.current[`${activeProjectId}:${result.sessionId}`] = true;
+        setMessages((current) => current.filter((m) => !m.id.startsWith("local-")));
       }
 
-      setMessages((current) => [
-        ...current.filter((m) => m.id !== result.message.id && !m.id.startsWith("local-")),
-        result.message,
-      ]);
       await refreshProjectsAndStatus(activeProjectId);
       await Promise.all([
         loadProjectSessions(activeProjectId, { silent: true }),
@@ -3583,10 +3589,6 @@ async function loadDiff(projectId: string) {
         loadPendingQuestions(activeProjectId),
       ]);
       void loadDiff(activeProjectId);
-      // Reconcile with server after a brief delay — don't mask send errors
-      setTimeout(() => {
-        void loadMessages(activeProjectId, { silent: true, sessionId: result.sessionId });
-      }, 800);
     } catch (error) {
       setProjectError(error instanceof Error ? error.message : "Failed to send message");
       setMessages((current) => current.filter((message) => message.id !== userEcho.id));
@@ -3631,7 +3633,7 @@ async function loadDiff(projectId: string) {
 
   function handleChatScroll(event: UIEvent<HTMLElement>) {
     const body = event.currentTarget;
-    const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 180;
+    const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
     setIsChatNearBottom(nearBottom);
 
     if (!nearBottom || !activeChatKey || timelineEntries.length === 0) {
