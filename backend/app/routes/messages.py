@@ -108,6 +108,7 @@ def send_project_message(project_id: int):
 
         project.last_message_preview = text[:180]
         project.last_activity_at = _utc_now()
+        project.session_status = "idle"
         db.session.commit()
     except Exception as exc:
         project.session_status = "error"
