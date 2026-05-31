@@ -98,7 +98,7 @@ def send_project_message(project_id: int):
         project.session_status = "running"
         db.session.commit()
 
-        response_message = opencode_client.send_message(
+        opencode_client.send_message_async(
             session_id=session_id,
             directory=project.path,
             text=text,
@@ -106,10 +106,8 @@ def send_project_message(project_id: int):
             agent=runtime_selection["agent"],
         )
 
-        normalized = _message_to_dict(response_message)
-        project.last_message_preview = normalized.get("text") or text[:180]
+        project.last_message_preview = text[:180]
         project.last_activity_at = _utc_now()
-        project.session_status = "idle"
         db.session.commit()
     except Exception as exc:
         project.session_status = "error"
@@ -119,7 +117,7 @@ def send_project_message(project_id: int):
     return jsonify(
         {
             "sessionId": session_id,
-            "message": normalized,
+            "ok": True,
         }
     )
 

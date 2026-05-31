@@ -104,6 +104,28 @@ import { CommandPickerModal } from "./components/ui/CommandPickerModal";
 import { FixtureBanner } from "./components/ui/FixtureBanner";
 import { QuestionCard } from "./components/ui/QuestionCard";
 
+function mergePartLists(
+  existing: ChatMessage["parts"],
+  incoming: ChatMessage["parts"],
+): ChatMessage["parts"] {
+  const merged = [...existing];
+  for (const fp of incoming) {
+    const fpObj = fp as Record<string, unknown> | null;
+    const fpId = fpObj?.id;
+    if (fpId) {
+      const idx = merged.findIndex((p) => (p as Record<string, unknown> | null)?.id === fpId);
+      if (idx >= 0) {
+        merged[idx] = fp;
+      } else {
+        merged.push(fp);
+      }
+    } else {
+      merged.push(fp);
+    }
+  }
+  return merged;
+}
+
 export function App() {
   const PROJECTS_PAGE_SIZE = 120;
   const SESSION_LIST_REFRESH_MS = 15000;
@@ -340,6 +362,7 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaChunksRef = useRef<BlobPart[]>([]);
   const prevQuestionCountRef = useRef(0);
+  const hasSelectedProjectRef = useRef(false);
   const speakingAudioRef = useRef<HTMLAudioElement | null>(null);
   const speakingUrlRef = useRef<string | null>(null);
   const messageLoadRequestRef = useRef(0);
@@ -993,7 +1016,13 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
     }
 
     if (!activeProjectId) {
-      setMobileProjectListOpen(true);
+      // Only auto-open project list if user has never had a selected project
+      // (prevents redirect during reconnection or transient null states)
+      if (!hasSelectedProjectRef.current) {
+        setMobileProjectListOpen(true);
+      }
+    } else {
+      hasSelectedProjectRef.current = true;
     }
   }, [activeProjectId, isMobileViewport]);
 
@@ -2299,6 +2328,22 @@ async function loadDiff(projectId: string) {
     }
 
     let cancelled = false;
+    let lastSseEventAt = Date.now();
+    const updateLastSseEvent = () => { lastSseEventAt = Date.now(); };
+
+    const handleVisibility = () => {
+      if (cancelled) return;
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastSseEventAt < 15000) return;
+      // Force reconnect when returning after heartbeat timeout
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      setStreamStatus("reconnecting");
+      setReconnectStartedAtMs((current) => current ?? Date.now());
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
 
     const connect = () => {
       if (cancelled) {
@@ -2320,6 +2365,7 @@ async function loadDiff(projectId: string) {
       };
 
       stream.onmessage = (event) => {
+        updateLastSseEvent();
         const classification = classifyStreamEvent(event.data);
 
         if (classification.isHeartbeat) {
@@ -2334,7 +2380,7 @@ async function loadDiff(projectId: string) {
               setStreamStatus("reconnecting");
               setReconnectStartedAtMs(Date.now());
             }
-          }, 20000);
+          }, 15000);
           return;
         }
 
@@ -2400,7 +2446,16 @@ async function loadDiff(projectId: string) {
             if (!targetMsgId) return;
             setMessages((current) => {
               const msgIndex = current.findIndex((m) => m.id === targetMsgId);
-              if (msgIndex < 0) return current;
+              if (msgIndex < 0) {
+                // Delta arrived before message.updated — create skeleton so future deltas don't get dropped
+                return [...current, {
+                  id: targetMsgId,
+                  role: "assistant",
+                  createdAt: new Date().toISOString(),
+                  text: partData.text || "",
+                  parts: partData.text ? [{ type: "text", id: partData.partID, text: partData.text }] : [],
+                }];
+              }
 
               const existing = current[msgIndex];
               const updatedParts = [...existing.parts];
@@ -2498,13 +2553,14 @@ async function loadDiff(projectId: string) {
             setMessages((current) => {
               const existingIdx = current.findIndex((m) => m.id === infoId);
               if (existingIdx >= 0) {
-                const freshParts = Array.isArray(info.parts) ? info.parts as ChatMessage["parts"] : undefined;
                 const freshText = typeof info.text === "string" ? info.text : undefined;
+                const freshParts = Array.isArray(info.parts) ? info.parts : undefined;
                 const next = [...current];
+                // Merge parts per-id instead of replacing (preserves delta-appended content)
                 next[existingIdx] = {
                   ...current[existingIdx],
-                  ...(freshParts ? { parts: freshParts } : {}),
                   ...(freshText !== undefined ? { text: freshText } : {}),
+                  ...(freshParts ? { parts: mergePartLists(current[existingIdx].parts, freshParts as ChatMessage["parts"]) } : {}),
                 };
                 return next;
               }
@@ -2537,7 +2593,8 @@ async function loadDiff(projectId: string) {
           if (statusData && statusData.status) {
             const statusType = String((statusData.status as Record<string, unknown>).type || "");
             if (statusType === "idle") {
-              void loadMessages(activeProjectId, { silent: true });
+              // Session is done; SSE already delivered all data — no need for a full reload
+              setRunIntentActive(false);
             }
           }
         }
@@ -2577,6 +2634,7 @@ async function loadDiff(projectId: string) {
 
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", handleVisibility);
       if (streamReconnectTimerRef.current !== null) {
         window.clearTimeout(streamReconnectTimerRef.current);
         streamReconnectTimerRef.current = null;
@@ -3555,14 +3613,18 @@ async function loadDiff(projectId: string) {
         ? await runCommand(activeProjectId, parsed.command, parsed.argumentsList, activeSessionId)
         : await sendMessage(activeProjectId, text, activeSessionId);
 
-      if (!parsed) {
+      if (parsed) {
+        // Command path — backend returns the result message synchronously
+        setMessages((current) => [
+          ...current.filter((m) => !m.id.startsWith("local-")),
+          result.message,
+        ]);
+      } else {
+        // Regular message path — response arrives via SSE events
         awaitingFinalReplyNotificationByChatRef.current[`${activeProjectId}:${result.sessionId}`] = true;
+        setMessages((current) => current.filter((m) => !m.id.startsWith("local-")));
       }
 
-      setMessages((current) => [
-        ...current.filter((m) => m.id !== result.message.id && !m.id.startsWith("local-")),
-        result.message,
-      ]);
       await refreshProjectsAndStatus(activeProjectId);
       await Promise.all([
         loadProjectSessions(activeProjectId, { silent: true }),
@@ -3570,10 +3632,6 @@ async function loadDiff(projectId: string) {
         loadPendingQuestions(activeProjectId),
       ]);
       void loadDiff(activeProjectId);
-      // Reconcile with server after a brief delay — don't mask send errors
-      setTimeout(() => {
-        void loadMessages(activeProjectId, { silent: true, sessionId: result.sessionId });
-      }, 800);
     } catch (error) {
       setProjectError(error instanceof Error ? error.message : "Failed to send message");
       setMessages((current) => current.filter((message) => message.id !== userEcho.id));

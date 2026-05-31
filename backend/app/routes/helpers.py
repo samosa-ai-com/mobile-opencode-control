@@ -50,6 +50,7 @@ __all__ = [
     "_message_to_dict",
     "_session_to_dict",
     "_list_project_sessions",
+    "_latest_project_session",
     "_resolve_project_session",
     "_ensure_project_session",
     "_sort_sessions_desc",
@@ -720,6 +721,13 @@ def _list_project_sessions(
     ]
     return _sort_sessions_desc(matching_sessions)
 
+def _latest_project_session(project: Project, opencode_client) -> str | None:
+    sessions = opencode_client.list_sessions(limit=1, directory=_normalize_project_path(project.path))
+    for session in sessions:
+        if _session_matches_project(project, session):
+            return str(session.get("id") or "").strip()
+    return None
+
 def _resolve_project_session(
     project: Project,
     opencode_client,
@@ -740,6 +748,13 @@ def _resolve_project_session(
         try:
             session = opencode_client.get_session(candidate_session_id)
             if _session_matches_project(project, session):
+                # Check if a newer session exists for this directory (e.g., created by TUI)
+                latest = _latest_project_session(project, opencode_client)
+                if latest and latest != candidate_session_id:
+                    project.last_session_id = latest
+                    project.last_activity_at = _utc_now()
+                    db.session.commit()
+                    return latest
                 if project.last_session_id != candidate_session_id:
                     project.last_session_id = candidate_session_id
                     project.last_activity_at = _utc_now()

@@ -177,6 +177,36 @@ class OpenCodeClient:
         response.raise_for_status()
         return response.json()
 
+    def send_message_async(
+        self,
+        session_id: str,
+        directory: str,
+        text: str,
+        model: str | None = None,
+        agent: str | None = None,
+    ) -> None:
+        payload = {
+            "directory": directory,
+            "parts": [{"type": "text", "text": text}],
+        }
+        if model:
+            provider_id, separator, model_id = model.partition("/")
+            if separator and provider_id and model_id:
+                payload["model"] = {
+                    "providerID": provider_id,
+                    "modelID": model_id,
+                }
+        if agent:
+            payload["agent"] = agent
+        response = requests.post(
+            f"{self.base_url}/session/{session_id}/prompt_async",
+            params={"directory": directory},
+            json=payload,
+            headers=self._headers(),
+            timeout=15,
+        )
+        response.raise_for_status()
+
     def run_command(
         self,
         session_id: str,
