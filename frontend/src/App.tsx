@@ -351,6 +351,7 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const awaitingFinalReplyNotificationByChatRef = useRef<Record<string, boolean>>({});
   const notificationDebounceTimerRef = useRef<number | null>(null);
   const idleDebounceTimerRef = useRef<number | null>(null);
+  const lastBusyReceivedAtRef = useRef(0);
   const pendingNotificationDataRef = useRef<{
     chatKey: string;
     projectName: string;
@@ -1359,6 +1360,10 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
       return;
     }
     if (hasStreamingActivity) {
+      return;
+    }
+    // Don't race against SSE busy handler — wait 3s after last busy before switching to send
+    if (Date.now() - lastBusyReceivedAtRef.current < 3000) {
       return;
     }
     setRunIntentActive(false);
@@ -2531,11 +2536,13 @@ async function loadDiff(projectId: string) {
                 }
               }, 2000);
             } else if (statusType === "busy") {
+              lastBusyReceivedAtRef.current = Date.now();
               // Cancel idle debounce if activity resumes
               if (idleDebounceTimerRef.current !== null) {
                 window.clearTimeout(idleDebounceTimerRef.current);
                 idleDebounceTimerRef.current = null;
               }
+              setRunIntentActive(true);
             }
           }
         }
