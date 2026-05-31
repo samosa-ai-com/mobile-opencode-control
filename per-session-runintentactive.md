@@ -116,10 +116,10 @@ setRunIntentActive(prev => ({...prev, [result.sessionId]: true}));
 
 ```ts
 // Before
-setRunIntentActive(true);
+setRunIntentActive(false);
 
 // After
-setRunIntentActive(prev => activeSessionId ? ({...prev, [activeSessionId]: true}) : prev);
+setRunIntentActive(prev => activeSessionId ? ({...prev, [activeSessionId]: false}) : prev);
 ```
 
 ## handleAbortGeneration finally (line 3631)
