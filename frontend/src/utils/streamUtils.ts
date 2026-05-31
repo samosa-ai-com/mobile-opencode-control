@@ -69,8 +69,13 @@ export function classifyRawEvent(eventLines: string[]): StreamEventClassificatio
 
   if (!result.rawEventType) {
     const payload = extractDataJsonFromRawEvent(eventLines);
-    if (payload && typeof payload.type === "string") {
-      classifyByTypeString(result, payload.type.toLowerCase());
+    if (payload) {
+      // Unwrap GlobalEvent envelope: { directory, payload: { type, properties } }
+      const inner = payload.payload as Record<string, unknown> | undefined;
+      const eventData = (inner && typeof inner.type === "string") ? inner : payload;
+      if (typeof eventData.type === "string") {
+        classifyByTypeString(result, eventData.type.toLowerCase());
+      }
     }
   }
 
