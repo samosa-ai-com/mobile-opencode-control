@@ -332,15 +332,11 @@ def stream_project_events(project_id: int):
                 timeout=120,
             ) as upstream:
                 upstream.raise_for_status()
-                upstream.raw.settimeout(30)
                 event_lines: list[str] = []
 
                 for line in upstream.iter_lines(decode_unicode=True):
                     if line is None:
                         continue
-
-                    if request.is_disconnected():
-                        return
 
                     normalized_line = line.rstrip("\n")
                     if not normalized_line:
@@ -368,14 +364,13 @@ def stream_project_events(project_id: int):
         except (ClientDisconnected, OSError):
             return
         except Exception:
-            if not request.is_disconnected():
-                app.logger.exception(
-                    "Failed to stream project events for project %s", project.id
-                )
-                error_payload = json.dumps(
-                    {"sessionId": session_id, "error": "Stream connection failed"}
-                )
-                yield f"event: error\ndata: {error_payload}\n\n"
+            app.logger.exception(
+                "Failed to stream project events for project %s", project.id
+            )
+            error_payload = json.dumps(
+                {"sessionId": session_id, "error": "Stream connection failed"}
+            )
+            yield f"event: error\ndata: {error_payload}\n\n"
 
     return Response(
         stream_with_context(_stream()),
@@ -401,15 +396,11 @@ def stream_global_project_events():
                 timeout=120,
             ) as upstream:
                 upstream.raise_for_status()
-                upstream.raw.settimeout(30)
                 event_lines: list[str] = []
 
                 for line in upstream.iter_lines(decode_unicode=True):
                     if line is None:
                         continue
-
-                    if request.is_disconnected():
-                        return
 
                     normalized_line = line.rstrip("\n")
                     if not normalized_line:
@@ -427,10 +418,9 @@ def stream_global_project_events():
         except (ClientDisconnected, OSError):
             return
         except Exception:
-            if not request.is_disconnected():
-                app.logger.exception("Failed to stream global project events")
-                error_payload = json.dumps({"error": "Stream connection failed"})
-                yield f"event: error\ndata: {error_payload}\n\n"
+            app.logger.exception("Failed to stream global project events")
+            error_payload = json.dumps({"error": "Stream connection failed"})
+            yield f"event: error\ndata: {error_payload}\n\n"
 
     return Response(
         stream_with_context(_stream()),
