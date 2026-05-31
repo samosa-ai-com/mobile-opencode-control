@@ -106,6 +106,12 @@ def send_project_message(project_id: int):
             agent=runtime_selection["agent"],
         )
 
+        # Check if a newer session appeared (e.g., from TUI creating one concurrently)
+        latest_session_id = _latest_project_session(project, opencode_client)
+        if latest_session_id and latest_session_id != session_id:
+            session_id = latest_session_id
+            project.last_session_id = latest_session_id
+
         project.last_message_preview = text[:180]
         project.last_activity_at = _utc_now()
         project.session_status = "idle"
@@ -353,8 +359,6 @@ def stream_project_events(project_id: int):
                         continue
 
                     if normalized_line.startswith(":"):
-                        # Forward SSE comment heartbeats to keep connection alive
-                        yield f"{normalized_line}\n"
                         continue
                     event_lines.append(normalized_line)
         except Exception:

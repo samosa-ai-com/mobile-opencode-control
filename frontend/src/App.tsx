@@ -104,28 +104,6 @@ import { CommandPickerModal } from "./components/ui/CommandPickerModal";
 import { FixtureBanner } from "./components/ui/FixtureBanner";
 import { QuestionCard } from "./components/ui/QuestionCard";
 
-function mergePartLists(
-  existing: ChatMessage["parts"],
-  incoming: ChatMessage["parts"],
-): ChatMessage["parts"] {
-  const merged = [...existing];
-  for (const fp of incoming) {
-    const fpObj = fp as Record<string, unknown> | null;
-    const fpId = fpObj?.id;
-    if (fpId) {
-      const idx = merged.findIndex((p) => (p as Record<string, unknown> | null)?.id === fpId);
-      if (idx >= 0) {
-        merged[idx] = fp;
-      } else {
-        merged.push(fp);
-      }
-    } else {
-      merged.push(fp);
-    }
-  }
-  return merged;
-}
-
 export function App() {
   const PROJECTS_PAGE_SIZE = 120;
   const SESSION_LIST_REFRESH_MS = 15000;
@@ -369,10 +347,10 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const messageRequestInFlightRef = useRef(false);
   const pendingMessageRefreshRef = useRef<string | null>(null);
   const pendingScrollAnchorRef = useRef<{ entryId: string; top: number } | null>(null);
-  const activeProjectPathRef = useRef<string | null>(null);
   const lastFinalAssistantMessageIdByChatRef = useRef<Record<string, string>>({});
   const awaitingFinalReplyNotificationByChatRef = useRef<Record<string, boolean>>({});
   const notificationDebounceTimerRef = useRef<number | null>(null);
+  const idleDebounceTimerRef = useRef<number | null>(null);
   const pendingNotificationDataRef = useRef<{
     chatKey: string;
     projectName: string;
@@ -387,7 +365,6 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const sessionLoadRequestRef = useRef(0);
   const projectFilePreviewRequestRef = useRef(0);
   const projectFileLoadGenerationRef = useRef(0);
-  const heartbeatTimerRef = useRef<number | null>(null);
   const streamStatusRef = useRef(streamStatus);
   streamStatusRef.current = streamStatus;
   const lastAssistantMessageIdBySessionRef = useRef<Record<string, string>>({});
@@ -1032,7 +1009,6 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
     () => projects.find((project) => project.id === activeProjectId) ?? null,
     [projects, activeProjectId]
   );
-  activeProjectPathRef.current = activeProject?.path ?? null;
   const activeSession = useMemo(
     () => projectSessions.find((session) => session.id === activeSessionId) ?? null,
     [projectSessions, activeSessionId]
@@ -2507,13 +2483,10 @@ async function loadDiff(projectId: string) {
             setMessages((current) => {
               const existingIdx = current.findIndex((m) => m.id === infoId);
               if (existingIdx >= 0) {
-                const freshText = typeof info.text === "string" ? info.text : undefined;
-                const freshParts = Array.isArray(info.parts) ? info.parts : undefined;
                 const next = [...current];
+                // Don't update text or parts — message.part.updated/delta already built them
                 next[existingIdx] = {
                   ...current[existingIdx],
-                  ...(freshText !== undefined ? { text: freshText } : {}),
-                  ...(freshParts ? { parts: mergePartLists(current[existingIdx].parts, freshParts as ChatMessage["parts"]) } : {}),
                 };
                 return next;
               }
@@ -2545,7 +2518,24 @@ async function loadDiff(projectId: string) {
           if (statusData && statusData.status) {
             const statusType = String((statusData.status as Record<string, unknown>).type || "");
             if (statusType === "idle") {
-              setRunIntentActive(false);
+              // Debounce 2s before switching to send + soft refresh
+              // Prevents toggling between messages in plan mode
+              if (idleDebounceTimerRef.current !== null) {
+                window.clearTimeout(idleDebounceTimerRef.current);
+              }
+              idleDebounceTimerRef.current = window.setTimeout(() => {
+                idleDebounceTimerRef.current = null;
+                setRunIntentActive(false);
+                if (activeProjectId && activeSessionId) {
+                  void loadMessages(activeProjectId, { silent: true, sessionId: activeSessionId });
+                }
+              }, 2000);
+            } else if (statusType === "busy") {
+              // Cancel idle debounce if activity resumes
+              if (idleDebounceTimerRef.current !== null) {
+                window.clearTimeout(idleDebounceTimerRef.current);
+                idleDebounceTimerRef.current = null;
+              }
             }
           }
         }
@@ -2585,6 +2575,10 @@ async function loadDiff(projectId: string) {
       if (streamReconnectTimerRef.current !== null) {
         window.clearTimeout(streamReconnectTimerRef.current);
         streamReconnectTimerRef.current = null;
+      }
+      if (idleDebounceTimerRef.current !== null) {
+        window.clearTimeout(idleDebounceTimerRef.current);
+        idleDebounceTimerRef.current = null;
       }
       if (eventSourceRef.current) {
         eventSourceRef.current.close();

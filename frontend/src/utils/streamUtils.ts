@@ -285,7 +285,6 @@ export function parseApprovalFromStreamData(data: string): {
       return { request: null, resolvedPermissionId: null };
     }
 
-    // Unwrap GlobalEvent envelope
     const inner = (payload.payload as Record<string, unknown>) || payload;
 
     const typeValue = String(inner.type || "").toLowerCase();
@@ -335,7 +334,6 @@ export function parseQuestionFromStreamData(data: string): {
       return { request: null, resolvedQuestionId: null };
     }
 
-    // Unwrap GlobalEvent envelope
     const inner = (payload.payload as Record<string, unknown>) || payload;
 
     const typeValue = String(inner.type || "").toLowerCase();
@@ -505,6 +503,7 @@ export function classifyStreamEvent(data: string): StreamEventClassification {
 
   return result;
 }
+
 
 export type MessagePartPayload = {
   sessionID: string | null;
