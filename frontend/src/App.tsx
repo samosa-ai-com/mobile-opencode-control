@@ -83,7 +83,7 @@ import { formatCompactSessionId, formatElapsedShort, formatSessionOptionLabel, f
 import { buildGroupedTimelineEntries, buildMessageStableKey, getNonTextParts, timelineEventToTaskRun } from "./utils/messageUtils";
 import { buildProjectPathFromRoot, extractRootFromProjectPath, getSuggestedProjectRoot, normalizeProjectRootPath, projectInitials } from "./utils/projectUtils";
 import { toDateInputPartsInTimezone, toDateTimeInputValueInTimezone, toIsoInTimezone } from "./utils/taskUtils";
-import { parseApprovalFromStreamData, parseQuestionFromStreamData, classifyStreamEvent, extractMessageFromEvent, extractMessagePartText, extractPartFromEvent, extractPartRemovalFromEvent, extractDiffFromEvent, extractSessionStatusFromEvent } from "./utils/streamUtils";
+import { parseApprovalFromEventLines, parseQuestionFromEventLines, classifyRawEvent, extractMessageFromEvent, extractMessagePartText, extractPartFromEvent, extractPartRemovalFromEvent, extractDiffFromEvent, extractSessionStatusFromEvent } from "./utils/streamUtils";
 import { buildInitialQuestionDraft, buildQuestionReplyAnswers, getManualInstallMessage, inferTelemetryCategory, markerTimeWindowMs, nextReconnectDelayMs, parseSlashCommand, removeQuestionFromList, resolveDevFixtureMode, schedulerHeartbeatState, scrollEntryIntoView } from "./utils/miscUtils";
 import { LoginView } from "./components/auth/LoginView";
 import { AgentActivityCard } from "./components/chat/AgentActivityCard";
@@ -369,6 +369,7 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const messageRequestInFlightRef = useRef(false);
   const pendingMessageRefreshRef = useRef<string | null>(null);
   const pendingScrollAnchorRef = useRef<{ entryId: string; top: number } | null>(null);
+  const activeProjectPathRef = useRef<string | null>(null);
   const lastFinalAssistantMessageIdByChatRef = useRef<Record<string, string>>({});
   const awaitingFinalReplyNotificationByChatRef = useRef<Record<string, boolean>>({});
   const notificationDebounceTimerRef = useRef<number | null>(null);
@@ -1031,6 +1032,7 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
     () => projects.find((project) => project.id === activeProjectId) ?? null,
     [projects, activeProjectId]
   );
+  activeProjectPathRef.current = activeProject?.path ?? null;
   const activeSession = useMemo(
     () => projectSessions.find((session) => session.id === activeSessionId) ?? null,
     [projectSessions, activeSessionId]
@@ -2320,306 +2322,284 @@ async function loadDiff(projectId: string) {
         window.clearTimeout(streamReconnectTimerRef.current);
         streamReconnectTimerRef.current = null;
       }
-      if (heartbeatTimerRef.current !== null) {
-        window.clearTimeout(heartbeatTimerRef.current);
-        heartbeatTimerRef.current = null;
-      }
       return;
     }
 
     let cancelled = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let abortController: AbortController | null = null;
     let lastSseEventAt = Date.now();
-    const updateLastSseEvent = () => { lastSseEventAt = Date.now(); };
 
     const handleVisibility = () => {
       if (cancelled) return;
       if (document.visibilityState !== "visible") return;
       if (Date.now() - lastSseEventAt < 15000) return;
-      // Force reconnect when returning after heartbeat timeout
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
-      setStreamStatus("reconnecting");
-      setReconnectStartedAtMs((current) => current ?? Date.now());
+      abortController?.abort();
     };
     document.addEventListener("visibilitychange", handleVisibility);
 
-    const connect = () => {
-      if (cancelled) {
-        return;
-      }
+    const connect = async () => {
+      if (cancelled) return;
 
       setStreamStatus("connecting");
-      const stream = new EventSource(`/api/projects/${activeProjectId}/stream`, {
-        withCredentials: true,
-      });
-      eventSourceRef.current = stream;
+      try {
+        const infoResp = await fetch("/api/opencode/sse-info");
+        if (!infoResp.ok) throw new Error("Failed to fetch SSE info");
+        const info = await infoResp.json();
+        if (!info.healthy || !info.url || !info.auth) {
+          throw new Error("SSE info not available");
+        }
 
-      stream.onopen = () => {
+        const projectPath = activeProjectPathRef.current;
+        if (!projectPath) throw new Error("Project path not available");
+
+        abortController = new AbortController();
+        const response = await fetch(
+          `${info.url}/global/event?directory=${encodeURIComponent(projectPath)}`,
+          {
+            headers: {
+              Authorization: info.auth,
+              Accept: "text/event-stream",
+            },
+            signal: abortController.signal,
+          },
+        );
+        if (!response.ok || !response.body) {
+          throw new Error(`SSE connection failed: ${response.status}`);
+        }
+
         const wasReconnect = streamReconnectAttemptRef.current > 0;
         streamReconnectAttemptRef.current = 0;
         setStreamStatus("live");
         setReconnectStartedAtMs(null);
         setReconnectAttemptCount(0);
         addTelemetryMarker("stream.chat.open", { projectId: activeProjectId });
-        // After a reconnection, reload messages to recover events lost during the gap
+
         if (wasReconnect && activeProjectId && activeSessionId) {
           void loadMessages(activeProjectId, { silent: true, sessionId: activeSessionId });
         }
-      };
 
-      stream.onmessage = (event) => {
-        updateLastSseEvent();
-        const classification = classifyStreamEvent(event.data);
+        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+        let buffer = "";
 
-        if (classification.isHeartbeat) {
-          if (heartbeatTimerRef.current !== null) {
-            window.clearTimeout(heartbeatTimerRef.current);
-          }
-          heartbeatTimerRef.current = window.setTimeout(() => {
-            if (streamStatusRef.current === "live" && eventSourceRef.current) {
-              addTelemetryMarker("stream.heartbeat.stale", { projectId: activeProjectId });
-              eventSourceRef.current.close();
-              eventSourceRef.current = null;
-              setStreamStatus("reconnecting");
-              setReconnectStartedAtMs(Date.now());
-            }
-          }, 15000);
-          return;
-        }
+        while (!cancelled) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        // Parse event lines from the SSE wrapper
-        const eventLines = ((): string[] => {
-          try {
-            const wrapper = JSON.parse(event.data) as { event?: string[] };
-            return Array.isArray(wrapper.event) ? wrapper.event : [];
-          } catch {
-            return [];
-          }
-        })();
+          lastSseEventAt = Date.now();
+          buffer += value;
+          const messages = buffer.split("\n\n");
+          buffer = messages.pop() ?? "";
 
-        // --- Approvals ---
-        const parsed = parseApprovalFromStreamData(event.data);
-        if (parsed.request) {
-          setPendingApprovals((current) => {
-            if (current.some((item) => item.permissionId === parsed.request?.permissionId)) {
-              return current;
-            }
-            return [...current, parsed.request!];
-          });
-        }
-        if (parsed.resolvedPermissionId) {
-          setPendingApprovals((current) =>
-            current.filter((item) => item.permissionId !== parsed.resolvedPermissionId)
-          );
-        }
+          for (const raw of messages) {
+            if (!raw.trim()) continue;
+            const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+            if (lines.length === 0) continue;
 
-        // --- Questions ---
-        const parsedQuestion = parseQuestionFromStreamData(event.data);
-        if (parsedQuestion.request && parsedQuestion.request.sessionID === activeSessionId) {
-          setPendingQuestions((current) => {
-            if (current.some((item) => item.id === parsedQuestion.request?.id)) {
-              return current;
-            }
-            return [...current, parsedQuestion.request!];
-          });
-          setQuestionDrafts((current) => {
-            if (!parsedQuestion.request || current[parsedQuestion.request.id]) {
-              return current;
-            }
-            return {
-              ...current,
-              [parsedQuestion.request.id]: buildInitialQuestionDraft(parsedQuestion.request),
-            };
-          });
-        }
-        if (parsedQuestion.resolvedQuestionId) {
-          setPendingQuestions((current) => removeQuestionFromList(current, parsedQuestion.resolvedQuestionId!));
-          setQuestionDrafts((current) => {
-            const next = { ...current };
-            delete next[parsedQuestion.resolvedQuestionId!];
-            return next;
-          });
-        }
+            const eventLines = lines;
+            const classification = classifyRawEvent(eventLines);
+            if (classification.isHeartbeat) continue;
 
-        // --- Text delta (message.part.delta) — inline incremental update ---
-        if (classification.hasPartDelta) {
-          const partData = extractMessagePartText(eventLines);
-          if (partData && partData.text != null && partData.partID && (partData.messageID || activeSessionId)) {
-            const targetMsgId = partData.messageID || lastAssistantMessageIdBySessionRef.current[activeSessionId ?? ""];
-            if (!targetMsgId) return;
-            setMessages((current) => {
-              const msgIndex = current.findIndex((m) => m.id === targetMsgId);
-              if (msgIndex < 0) {
-                // Delta arrived before message.updated — create skeleton so future deltas don't get dropped
-                return [...current, {
-                  id: targetMsgId,
-                  role: "assistant",
-                  createdAt: new Date().toISOString(),
-                  text: partData.text || "",
-                  parts: partData.text ? [{ type: "text", id: partData.partID, text: partData.text }] : [],
-                }];
-              }
-
-              const existing = current[msgIndex];
-              const updatedParts = [...existing.parts];
-              const textPartIndex = updatedParts.findIndex(
-                (p) => typeof p === "object" && p !== null && p.type === "text" && p.id === partData.partID
-              );
-              if (textPartIndex >= 0) {
-                const existingText = (updatedParts[textPartIndex] as Record<string, unknown>).text as string || "";
-                updatedParts[textPartIndex] = { ...updatedParts[textPartIndex], text: existingText + (partData.text || "") };
-              } else {
-                updatedParts.push({ type: "text", id: partData.partID, text: partData.text });
-              }
-              const allText = updatedParts
-                .filter((p) => typeof p === "object" && p !== null && p.type === "text")
-                .map((p) => (p as Record<string, string>).text || "")
-                .join("\n").trim();
-              const next = [...current];
-              next[msgIndex] = { ...existing, text: allText, parts: updatedParts };
-              return next;
-            });
-          }
-        }
-
-        // --- Part update (message.part.updated) — inline full part ---
-        if (classification.hasPartUpdate) {
-          const extracted = extractPartFromEvent(eventLines);
-          if (extracted && extracted.part) {
-            const part = extracted.part;
-            const msgID = typeof part.messageID === "string" ? part.messageID : null;
-            const partID = typeof part.id === "string" ? part.id : null;
-            if (msgID && partID) {
-              setMessages((current) => {
-                const msgIndex = current.findIndex((m) => m.id === msgID);
-                if (msgIndex < 0) return current;
-
-                const existing = current[msgIndex];
-                const updatedParts = [...existing.parts];
-                const existingIdx = updatedParts.findIndex(
-                  (p) => typeof p === "object" && p !== null && (p as Record<string, unknown>).id === partID
-                );
-                if (existingIdx >= 0) {
-                  updatedParts[existingIdx] = part as unknown as ChatMessage["parts"][number];
-                } else {
-                  updatedParts.push(part as unknown as ChatMessage["parts"][number]);
+            // --- Approvals ---
+            const parsed = parseApprovalFromEventLines(eventLines);
+            if (parsed.request) {
+              setPendingApprovals((current) => {
+                if (current.some((item) => item.permissionId === parsed.request?.permissionId)) {
+                  return current;
                 }
-                const next = [...current];
-                next[msgIndex] = { ...existing, parts: updatedParts };
+                return [...current, parsed.request!];
+              });
+            }
+            if (parsed.resolvedPermissionId) {
+              setPendingApprovals((current) =>
+                current.filter((item) => item.permissionId !== parsed.resolvedPermissionId)
+              );
+            }
+
+            // --- Questions ---
+            const parsedQuestion = parseQuestionFromEventLines(eventLines);
+            if (parsedQuestion.request && parsedQuestion.request.sessionID === activeSessionId) {
+              setPendingQuestions((current) => {
+                if (current.some((item) => item.id === parsedQuestion.request?.id)) {
+                  return current;
+                }
+                return [...current, parsedQuestion.request!];
+              });
+              setQuestionDrafts((current) => {
+                if (!parsedQuestion.request || current[parsedQuestion.request.id]) {
+                  return current;
+                }
+                return {
+                  ...current,
+                  [parsedQuestion.request.id]: buildInitialQuestionDraft(parsedQuestion.request),
+                };
+              });
+            }
+            if (parsedQuestion.resolvedQuestionId) {
+              setPendingQuestions((current) => removeQuestionFromList(current, parsedQuestion.resolvedQuestionId!));
+              setQuestionDrafts((current) => {
+                const next = { ...current };
+                delete next[parsedQuestion.resolvedQuestionId!];
                 return next;
               });
             }
-          }
-        }
 
-        if (classification.hasPartRemove) {
-          const extracted = extractPartRemovalFromEvent(eventLines);
-          if (extracted?.messageID && extracted.partID) {
-            setMessages((current) => {
-              const msgIndex = current.findIndex((m) => m.id === extracted.messageID);
-              if (msgIndex < 0) return current;
-
-              const existing = current[msgIndex];
-              const isPartToRemove = (part: ChatMessage["parts"][number]) =>
-                typeof part === "object" &&
-                part !== null &&
-                (part as Record<string, unknown>).id === extracted.partID;
-              const updatedParts = existing.parts.filter((part) => !isPartToRemove(part));
-              if (updatedParts.length === existing.parts.length) return current;
-
-              const next = [...current];
-              next[msgIndex] = {
-                ...existing,
-                parts: updatedParts,
-                text: updatedParts
-                  .filter(
-                    (part) =>
-                      typeof part === "object" &&
-                      part !== null &&
-                      (part as Record<string, unknown>).type === "text"
-                  )
-                  .map((part) => (part as Record<string, string>).text || "")
-                  .join("\n")
-                  .trim(),
-              };
-              return next;
-            });
-          }
-        }
-
-        // --- Message update (message.updated) — inline upsert ---
-        if (classification.hasMessageUpdate) {
-          const info = extractMessageFromEvent(eventLines);
-          if (info && typeof info.id === "string" && typeof info.role === "string") {
-            const infoId = info.id;
-            const infoRole = info.role as ChatMessage["role"];
-            setMessages((current) => {
-              const existingIdx = current.findIndex((m) => m.id === infoId);
-              if (existingIdx >= 0) {
-                const freshText = typeof info.text === "string" ? info.text : undefined;
-                const freshParts = Array.isArray(info.parts) ? info.parts : undefined;
-                const next = [...current];
-                // Merge parts per-id instead of replacing (preserves delta-appended content)
-                next[existingIdx] = {
-                  ...current[existingIdx],
-                  ...(freshText !== undefined ? { text: freshText } : {}),
-                  ...(freshParts ? { parts: mergePartLists(current[existingIdx].parts, freshParts as ChatMessage["parts"]) } : {}),
-                };
-                return next;
+            // --- Text delta (message.part.delta) ---
+            if (classification.hasPartDelta) {
+              const partData = extractMessagePartText(eventLines);
+              if (partData && partData.text != null && partData.partID && (partData.messageID || activeSessionId)) {
+                const targetMsgId = partData.messageID || lastAssistantMessageIdBySessionRef.current[activeSessionId ?? ""];
+                if (!targetMsgId) return;
+                setMessages((current) => {
+                  const msgIndex = current.findIndex((m) => m.id === targetMsgId);
+                  if (msgIndex < 0) {
+                    return [...current, {
+                      id: targetMsgId,
+                      role: "assistant",
+                      createdAt: new Date().toISOString(),
+                      text: partData.text || "",
+                      parts: partData.text ? [{ type: "text", id: partData.partID, text: partData.text }] : [],
+                    }];
+                  }
+                  const existing = current[msgIndex];
+                  const updatedParts = [...existing.parts];
+                  const textPartIndex = updatedParts.findIndex(
+                    (p) => typeof p === "object" && p !== null && p.type === "text" && p.id === partData.partID
+                  );
+                  if (textPartIndex >= 0) {
+                    const existingText = (updatedParts[textPartIndex] as Record<string, unknown>).text as string || "";
+                    updatedParts[textPartIndex] = { ...updatedParts[textPartIndex], text: existingText + (partData.text || "") };
+                  } else {
+                    updatedParts.push({ type: "text", id: partData.partID, text: partData.text });
+                  }
+                  const allText = updatedParts
+                    .filter((p) => typeof p === "object" && p !== null && p.type === "text")
+                    .map((p) => (p as Record<string, string>).text || "")
+                    .join("\n").trim();
+                  const next = [...current];
+                  next[msgIndex] = { ...existing, text: allText, parts: updatedParts };
+                  return next;
+                });
               }
-              // New message — validate required fields before casting
-              const msg = {
-                id: infoId,
-                role: infoRole,
-                text: typeof info.text === "string" ? info.text : "",
-                createdAt: typeof info.time === "object" && info.time
-                  ? new Date((info.time as Record<string, unknown>).created as number).toISOString()
-                  : new Date().toISOString(),
-                parts: Array.isArray(info.parts) ? info.parts as ChatMessage["parts"] : [],
-              };
-              return [...current, msg];
-            });
-          }
-        }
+            }
 
-        // --- Diff update ---
-        if (classification.hasDiffUpdate) {
-          const diffData = extractDiffFromEvent(eventLines);
-          if (diffData) {
-            setDiffEntries(diffData.diff as unknown as SessionDiffEntry[]);
-          }
-        }
+            // --- Part update (message.part.updated) ---
+            if (classification.hasPartUpdate) {
+              const extracted = extractPartFromEvent(eventLines);
+              if (extracted && extracted.part) {
+                const part = extracted.part;
+                const msgID = typeof part.messageID === "string" ? part.messageID : null;
+                const partID = typeof part.id === "string" ? part.id : null;
+                if (msgID && partID) {
+                  setMessages((current) => {
+                    const msgIndex = current.findIndex((m) => m.id === msgID);
+                    if (msgIndex < 0) return current;
+                    const existing = current[msgIndex];
+                    const updatedParts = [...existing.parts];
+                    const existingIdx = updatedParts.findIndex(
+                      (p) => typeof p === "object" && p !== null && (p as Record<string, unknown>).id === partID
+                    );
+                    if (existingIdx >= 0) {
+                      updatedParts[existingIdx] = part as unknown as ChatMessage["parts"][number];
+                    } else {
+                      updatedParts.push(part as unknown as ChatMessage["parts"][number]);
+                    }
+                    const next = [...current];
+                    next[msgIndex] = { ...existing, parts: updatedParts };
+                    return next;
+                  });
+                }
+              }
+            }
 
-        // --- Session status ---
-        if (classification.hasSessionUpdate) {
-          const statusData = extractSessionStatusFromEvent(eventLines);
-          if (statusData && statusData.status) {
-            const statusType = String((statusData.status as Record<string, unknown>).type || "");
-            if (statusType === "idle") {
-              // Session is done; SSE already delivered all data — no need for a full reload
-              setRunIntentActive(false);
+            // --- Part remove ---
+            if (classification.hasPartRemove) {
+              const extracted = extractPartRemovalFromEvent(eventLines);
+              if (extracted?.messageID && extracted.partID) {
+                setMessages((current) => {
+                  const msgIndex = current.findIndex((m) => m.id === extracted.messageID);
+                  if (msgIndex < 0) return current;
+                  const existing = current[msgIndex];
+                  const isPartToRemove = (part: ChatMessage["parts"][number]) =>
+                    typeof part === "object" && part !== null && (part as Record<string, unknown>).id === extracted.partID;
+                  const updatedParts = existing.parts.filter((part) => !isPartToRemove(part));
+                  if (updatedParts.length === existing.parts.length) return current;
+                  const next = [...current];
+                  next[msgIndex] = {
+                    ...existing,
+                    parts: updatedParts,
+                    text: updatedParts
+                      .filter((p) => typeof p === "object" && p !== null && (p as Record<string, unknown>).type === "text")
+                      .map((p) => (p as Record<string, string>).text || "")
+                      .join("\n").trim(),
+                  };
+                  return next;
+                });
+              }
+            }
+
+            // --- Message update (message.updated) ---
+            if (classification.hasMessageUpdate) {
+              const info = extractMessageFromEvent(eventLines);
+              if (info && typeof info.id === "string" && typeof info.role === "string") {
+                const infoId = info.id;
+                const infoRole = info.role as ChatMessage["role"];
+                setMessages((current) => {
+                  const existingIdx = current.findIndex((m) => m.id === infoId);
+                  if (existingIdx >= 0) {
+                    const freshText = typeof info.text === "string" ? info.text : undefined;
+                    const freshParts = Array.isArray(info.parts) ? info.parts : undefined;
+                    const next = [...current];
+                    next[existingIdx] = {
+                      ...current[existingIdx],
+                      ...(freshText !== undefined ? { text: freshText } : {}),
+                      ...(freshParts ? { parts: mergePartLists(current[existingIdx].parts, freshParts as ChatMessage["parts"]) } : {}),
+                    };
+                    return next;
+                  }
+                  const msg = {
+                    id: infoId,
+                    role: infoRole,
+                    text: typeof info.text === "string" ? info.text : "",
+                    createdAt: typeof info.time === "object" && info.time
+                      ? new Date((info.time as Record<string, unknown>).created as number).toISOString()
+                      : new Date().toISOString(),
+                    parts: Array.isArray(info.parts) ? info.parts as ChatMessage["parts"] : [],
+                  };
+                  return [...current, msg];
+                });
+              }
+            }
+
+            // --- Diff update ---
+            if (classification.hasDiffUpdate) {
+              const diffData = extractDiffFromEvent(eventLines);
+              if (diffData) {
+                setDiffEntries(diffData.diff as unknown as SessionDiffEntry[]);
+              }
+            }
+
+            // --- Session status ---
+            if (classification.hasSessionUpdate) {
+              const statusData = extractSessionStatusFromEvent(eventLines);
+              if (statusData && statusData.status) {
+                const statusType = String((statusData.status as Record<string, unknown>).type || "");
+                if (statusType === "idle") {
+                  setRunIntentActive(false);
+                }
+              }
+            }
+
+            // Full refresh for compaction or deletion
+            const needsFullRefresh = classification.hasCompactionUpdate || classification.hasMessageDelete;
+            if (needsFullRefresh) {
+              scheduleStreamRefresh(activeProjectId);
             }
           }
         }
+      } catch (err) {
+        if (cancelled) return;
 
-        // Full refresh only for compaction or message deletion (structural changes)
-        const needsFullRefresh = classification.hasCompactionUpdate || classification.hasMessageDelete;
-        if (needsFullRefresh) {
-          scheduleStreamRefresh(activeProjectId);
-        }
-      };
-
-      stream.onerror = () => {
-        if (cancelled) {
-          return;
-        }
-
-        stream.close();
-        if (eventSourceRef.current === stream) {
-          eventSourceRef.current = null;
-        }
         setStreamStatus("reconnecting");
         setReconnectStartedAtMs((current) => current ?? Date.now());
         addTelemetryMarker("stream.chat.error", { projectId: activeProjectId });
@@ -2628,30 +2608,20 @@ async function loadDiff(projectId: string) {
         const delay = nextReconnectDelayMs(attempt);
         setReconnectAttemptCount(attempt + 1);
         streamReconnectAttemptRef.current = Math.min(attempt + 1, 5);
-        streamReconnectTimerRef.current = window.setTimeout(() => {
-          streamReconnectTimerRef.current = null;
-          connect();
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          void connect();
         }, delay);
-      };
+      }
     };
 
-    connect();
+    void connect();
 
     return () => {
       cancelled = true;
       document.removeEventListener("visibilitychange", handleVisibility);
-      if (streamReconnectTimerRef.current !== null) {
-        window.clearTimeout(streamReconnectTimerRef.current);
-        streamReconnectTimerRef.current = null;
-      }
-      if (heartbeatTimerRef.current !== null) {
-        window.clearTimeout(heartbeatTimerRef.current);
-        heartbeatTimerRef.current = null;
-      }
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      abortController?.abort();
     };
   }, [isAuthenticated, activeProjectId, activeSessionId]);
 
