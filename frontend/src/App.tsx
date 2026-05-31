@@ -352,6 +352,7 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const notificationDebounceTimerRef = useRef<number | null>(null);
   const idleDebounceTimerRef = useRef<number | null>(null);
   const lastBusyReceivedAtRef = useRef(0);
+  const silenceTimerRef = useRef<number | null>(null);
   const pendingNotificationDataRef = useRef<{
     chatKey: string;
     projectName: string;
@@ -2326,6 +2327,20 @@ async function loadDiff(projectId: string) {
       };
 
       stream.onmessage = (event) => {
+        // Reset silence timeout — any event means the connection is alive
+        if (silenceTimerRef.current !== null) {
+          window.clearTimeout(silenceTimerRef.current);
+        }
+        silenceTimerRef.current = window.setTimeout(() => {
+          silenceTimerRef.current = null;
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close();
+            eventSourceRef.current = null;
+          }
+          setStreamStatus("reconnecting");
+          setReconnectStartedAtMs(Date.now());
+        }, 30000);
+
         // Parse backend wrapper: data: {"sessionId": "...", "event": ["event: ...", "data: ..."]}
         const eventLines = ((): string[] => {
           try {
@@ -2488,12 +2503,8 @@ async function loadDiff(projectId: string) {
             setMessages((current) => {
               const existingIdx = current.findIndex((m) => m.id === infoId);
               if (existingIdx >= 0) {
-                const next = [...current];
                 // Don't update text or parts — message.part.updated/delta already built them
-                next[existingIdx] = {
-                  ...current[existingIdx],
-                };
-                return next;
+                return current;
               }
               const msg = {
                 id: infoId,
@@ -2586,6 +2597,10 @@ async function loadDiff(projectId: string) {
       if (idleDebounceTimerRef.current !== null) {
         window.clearTimeout(idleDebounceTimerRef.current);
         idleDebounceTimerRef.current = null;
+      }
+      if (silenceTimerRef.current !== null) {
+        window.clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
       }
       if (eventSourceRef.current) {
         eventSourceRef.current.close();

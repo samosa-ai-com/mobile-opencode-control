@@ -95,7 +95,6 @@ def send_project_message(project_id: int):
         else:
             session_id = _ensure_project_session(project, opencode_client)
         runtime_selection = _get_project_runtime_selection(project.id)
-        project.session_status = "running"
         db.session.commit()
 
         opencode_client.send_message_async(
@@ -114,10 +113,8 @@ def send_project_message(project_id: int):
 
         project.last_message_preview = text[:180]
         project.last_activity_at = _utc_now()
-        project.session_status = "idle"
         db.session.commit()
     except Exception as exc:
-        project.session_status = "error"
         db.session.commit()
         return _bad_gateway("Failed to send message", exc)
 
