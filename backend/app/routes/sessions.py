@@ -116,18 +116,18 @@ def update_project_session(project_id: int):
         return jsonify({"error": "sessionId is required"}), 400
 
     try:
-        session_id = _resolve_project_session(
-            project,
-            opencode_client,
-            session_id=requested_session_id,
-            create_if_missing=False,
-        )
-        session = opencode_client.get_session(session_id)
-        project.last_session_id = session_id
+        session = opencode_client.get_session(requested_session_id)
+        if not _session_matches_project(project, session):
+            return jsonify({"error": "Selected session does not belong to this project"}), 400
+        project.last_session_id = requested_session_id
         project.last_activity_at = _utc_now()
+        _clear_project_session_cache(project.id)
         db.session.commit()
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        session_id = requested_session_id
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return jsonify({"error": "Session not found"}), 404
+        return _bad_gateway("Failed to switch session", exc)
     except Exception as exc:
         return _bad_gateway("Failed to switch session", exc)
 
