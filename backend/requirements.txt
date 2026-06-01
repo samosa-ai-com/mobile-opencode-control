@@ -10,3 +10,5 @@ TTS==0.22.0
 soundfile==0.12.1
 GitPython==3.1.41
 waitress==3.0.2
+gunicorn==26.0.0
+gevent==26.5.0

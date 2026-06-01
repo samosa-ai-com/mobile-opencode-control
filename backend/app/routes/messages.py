@@ -3,6 +3,7 @@ import json
 
 import requests
 from flask import Response, jsonify, request, stream_with_context
+from werkzeug.exceptions import ClientDisconnected
 
 from ..auth import auth_required
 from ..db import db
@@ -328,7 +329,7 @@ def stream_project_events(project_id: int):
                 params={"directory": project.path},
                 headers=opencode_client.event_headers,
                 stream=True,
-                timeout=600,
+                timeout=120,
             ) as upstream:
                 upstream.raise_for_status()
                 event_lines: list[str] = []
@@ -358,6 +359,10 @@ def stream_project_events(project_id: int):
                     if normalized_line.startswith(":"):
                         continue
                     event_lines.append(normalized_line)
+        except GeneratorExit:
+            return
+        except (ClientDisconnected, OSError):
+            return
         except Exception:
             app.logger.exception(
                 "Failed to stream project events for project %s", project.id
@@ -388,7 +393,7 @@ def stream_global_project_events():
                 f"{opencode_client.base_url}/global/sync-event",
                 headers=opencode_client.event_headers,
                 stream=True,
-                timeout=600,
+                timeout=120,
             ) as upstream:
                 upstream.raise_for_status()
                 event_lines: list[str] = []
@@ -408,6 +413,10 @@ def stream_global_project_events():
                     if normalized_line.startswith(":"):
                         continue
                     event_lines.append(normalized_line)
+        except GeneratorExit:
+            return
+        except (ClientDisconnected, OSError):
+            return
         except Exception:
             app.logger.exception("Failed to stream global project events")
             error_payload = json.dumps({"error": "Stream connection failed"})
