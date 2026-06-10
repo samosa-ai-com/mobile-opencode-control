@@ -107,6 +107,7 @@ import { QuestionCard } from "./components/ui/QuestionCard";
 export function App() {
   const PROJECTS_PAGE_SIZE = 120;
   const SESSION_LIST_REFRESH_MS = 15000;
+  const MODEL_LIST_REFRESH_MS = 60000;
   const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = "opencode.desktopSidebarWidth";
   const fixtureMode = useMemo(() => resolveDevFixtureMode(), []);
 
@@ -1992,9 +1993,12 @@ async function loadDiff(projectId: string) {
     }
   }
 
-  async function loadProjectRuntime(projectId: string) {
-    setRuntimeLoading(true);
-    setRuntimeError(null);
+  async function loadProjectRuntime(projectId: string, options?: { silent?: boolean }) {
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setRuntimeLoading(true);
+      setRuntimeError(null);
+    }
     try {
       const result = await fetchProjectRuntime(projectId);
       setRuntimeModels(result.models);
@@ -2002,13 +2006,17 @@ async function loadDiff(projectId: string) {
       setSelectedModel(result.selectedModel);
       setSelectedAgent(result.selectedAgent);
     } catch (error) {
-      setRuntimeError(error instanceof Error ? error.message : "Failed to load runtime controls");
+      if (!silent) {
+        setRuntimeError(error instanceof Error ? error.message : "Failed to load runtime controls");
+      }
       setRuntimeModels([]);
       setRuntimeAgents([]);
       setSelectedModel(null);
       setSelectedAgent(null);
     } finally {
-      setRuntimeLoading(false);
+      if (!silent) {
+        setRuntimeLoading(false);
+      }
     }
   }
 
@@ -2736,6 +2744,32 @@ async function loadDiff(projectId: string) {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [isAuthenticated, activeProjectId, SESSION_LIST_REFRESH_MS]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !activeProjectId) {
+      return;
+    }
+
+    const refreshModels = () => {
+      void loadProjectRuntime(activeProjectId, { silent: true });
+    };
+
+    const intervalId = window.setInterval(refreshModels, MODEL_LIST_REFRESH_MS);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshModels();
+      }
+    };
+
+    window.addEventListener("focus", refreshModels);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshModels);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [isAuthenticated, activeProjectId, MODEL_LIST_REFRESH_MS]);
 
   useEffect(() => {
     if (!activeProjectId && activeMainView !== "chat") {
