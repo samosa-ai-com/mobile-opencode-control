@@ -124,6 +124,12 @@ if $FRONTEND_USE_SYSTEMD; then
 else
   FRONTEND_PORT="$(pick_port "${FRONTEND_APP_PORT:-5173}")"
 fi
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT_DIR/.env"
+  set +a
+fi
 FRONTEND_ALLOWED_HOSTS="${FRONTEND_ALLOWED_HOSTS:-localhost,127.0.0.1}"
 FRONTEND_ORIGINS="${FRONTEND_ORIGINS:-http://localhost:${FRONTEND_PORT}}"
 FRONTEND_BASE_URL="http://localhost:${FRONTEND_PORT}"
