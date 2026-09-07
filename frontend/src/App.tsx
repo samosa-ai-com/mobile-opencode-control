@@ -4268,6 +4268,7 @@ async function loadDiff(projectId: string) {
             <button
               type="button"
               className="mobile-menu-button mobile-back-button"
+              aria-label="Back to projects"
               onClick={() => setMobileProjectListOpen(true)}
             >
               ←
@@ -4368,6 +4369,7 @@ async function loadDiff(projectId: string) {
               <button
                 type="button"
                 className="mobile-menu-button"
+                aria-label="Open settings"
                 onClick={() => setMobileSettingsOpen(true)}
               >
                 ⋮
@@ -5040,6 +5042,7 @@ async function loadDiff(projectId: string) {
             onClick={() => setCommandPickerOpen(true)}
             disabled={availableCommands.length === 0 || hasActiveRun}
             title="Browse available server commands"
+            aria-label="Browse available server commands"
           >
             /
           </button>

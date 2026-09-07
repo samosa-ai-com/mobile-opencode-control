@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useId } from "react";
 import type { OpenCodeCommand } from "../../types";
 
 export function CommandPickerModal({
@@ -16,15 +16,40 @@ export function CommandPickerModal({
   onQueryChange: (value: string) => void;
   onInsert: (commandName: string) => void;
 }) {
+  const titleId = useId();
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
+
   if (!open) {
     return null;
   }
 
   return (
-    <div className="command-picker-overlay" role="dialog" aria-modal="true">
+    <div
+      className="command-picker-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
       <div className="command-picker-modal">
         <div className="command-picker-header">
-          <strong>Server Commands</strong>
+          <strong id={titleId}>Server Commands</strong>
           <button type="button" onClick={onClose}>
             Close
           </button>
@@ -33,6 +58,7 @@ export function CommandPickerModal({
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           placeholder="Search commands or descriptions"
+          aria-label="Search commands or descriptions"
           autoFocus
         />
         <div className="command-picker-list">
