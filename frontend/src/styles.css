@@ -1727,11 +1727,11 @@ input {
 }
 
 .empty-state {
-  position: absolute;
-  inset: 0;
+  position: relative;
   display: grid;
   place-items: center;
   padding: 1rem;
+  min-height: min(40vh, 24rem);
 }
 
 .fixture-banner {
@@ -3895,8 +3895,10 @@ input {
 
 .toast {
   position: absolute;
-  bottom: 1rem;
+  top: 1rem;
   right: 1rem;
+  z-index: 20;
+  max-width: min(22rem, calc(100% - 2rem));
   padding: 0.6rem 0.75rem;
   border-radius: 10px;
 }
