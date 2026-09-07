@@ -121,7 +121,7 @@ input {
   border-right: 1px solid var(--border);
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
-  min-width: 256px;
+  min-width: 300px;
   min-height: 0;
   overflow: hidden;
   box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.03);
@@ -1046,10 +1046,16 @@ input {
   max-width: 76rem;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(300px, 460px) minmax(340px, 1fr);
+  grid-template-columns: minmax(min(100%, 280px), 460px) minmax(0, 1fr);
   gap: 0.9rem;
   align-items: start;
   min-height: 0;
+}
+
+@media (max-width: 1150px) {
+  .chat-toolbar-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .toolbar-card {
@@ -3131,6 +3137,13 @@ input {
   max-width: 92rem;
   margin: 0 auto;
   align-items: start;
+}
+
+@media (max-width: 1150px) {
+  .tasks-shell,
+  .tasks-editor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .tasks-browser,
