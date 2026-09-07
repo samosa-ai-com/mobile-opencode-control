@@ -16,6 +16,9 @@ export function RuntimeControls({
   sessionSwitching,
   compacting,
   error,
+  reloading,
+  reloadMessage,
+  onReload,
   onModelChange,
   onAgentChange,
   onSessionChange,
@@ -35,6 +38,9 @@ export function RuntimeControls({
   sessionSwitching: boolean;
   compacting: boolean;
   error: string | null;
+  reloading: boolean;
+  reloadMessage: string | null;
+  onReload: () => void;
   onModelChange: (value: string | null) => void;
   onAgentChange: (value: string | null) => void;
   onSessionChange: (value: string) => void;
@@ -77,10 +83,25 @@ export function RuntimeControls({
     }
   }
 
+  const activeIdInList =
+    activeSessionId !== null && sortedSessions.some((s) => s.id === activeSessionId);
+  const sessionSelectValue = activeIdInList ? (activeSessionId as string) : "";
+
   return (
     <div className="runtime-controls">
       <label>
-        <span>Model</span>
+        <span style={{ display: "inline-flex", gap: "8px", alignItems: "center" }}>
+          Model
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={onReload}
+            disabled={reloading}
+            style={{ padding: "4px 10px", fontSize: "12px", minHeight: "28px" }}
+          >
+            {reloading ? "↻ Reloading…" : "↻ Reload"}
+          </button>
+        </span>
         <select
           value={selectedModel ?? ""}
           onChange={(event) => onModelChange(event.currentTarget.value || null)}
@@ -113,14 +134,20 @@ export function RuntimeControls({
       <div className="session-section">
         <span className="session-section-label">Sessions</span>
         <select
-          value={activeSessionId ?? ""}
+          value={sessionSelectValue}
           onChange={(event) => handleSessionChange(event.currentTarget.value)}
           disabled={sessionLoading || sessionSwitching}
+          aria-label="Active session"
         >
           {sortedSessions.length === 0 ? (
             <option value="" disabled>{sessionLoading ? "Loading..." : "No session"}</option>
           ) : (
             <>
+              {!activeIdInList ? (
+                <option value="" disabled>
+                  {sessionLoading ? "Loading..." : "Select session…"}
+                </option>
+              ) : null}
               {sortedSessions.map((session) => {
                 const label = session.title || "Untitled session";
                 const ts = formatSessionTimestamp(session.updatedAt ?? session.createdAt);
@@ -155,6 +182,7 @@ export function RuntimeControls({
       </div>
       {saving ? <small>Saving runtime...</small> : null}
       {error ? <small className="runtime-error">{error}</small> : null}
+      {reloadMessage ? <small>{reloadMessage}</small> : null}
     </div>
   );
 }

@@ -107,6 +107,7 @@ import { QuestionCard } from "./components/ui/QuestionCard";
 export function App() {
   const PROJECTS_PAGE_SIZE = 120;
   const SESSION_LIST_REFRESH_MS = 15000;
+  const MODEL_LIST_REFRESH_MS = 60000;
   const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = "opencode.desktopSidebarWidth";
   const fixtureMode = useMemo(() => resolveDevFixtureMode(), []);
 
@@ -239,6 +240,9 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const [runtimeLoading, setRuntimeLoading] = useState(false);
   const [runtimeSaving, setRuntimeSaving] = useState(false);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
+  const [reloading, setReloading] = useState(false);
+  const [reloadMessage, setReloadMessage] = useState<string | null>(null);
+  const reloadMessageTimeoutRef = useRef<number | null>(null);
   const [projectSessions, setProjectSessions] = useState<ProjectSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
@@ -1992,9 +1996,12 @@ async function loadDiff(projectId: string) {
     }
   }
 
-  async function loadProjectRuntime(projectId: string) {
-    setRuntimeLoading(true);
-    setRuntimeError(null);
+  async function loadProjectRuntime(projectId: string, options?: { silent?: boolean }) {
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setRuntimeLoading(true);
+      setRuntimeError(null);
+    }
     try {
       const result = await fetchProjectRuntime(projectId);
       setRuntimeModels(result.models);
@@ -2002,15 +2009,49 @@ async function loadDiff(projectId: string) {
       setSelectedModel(result.selectedModel);
       setSelectedAgent(result.selectedAgent);
     } catch (error) {
-      setRuntimeError(error instanceof Error ? error.message : "Failed to load runtime controls");
+      if (!silent) {
+        setRuntimeError(error instanceof Error ? error.message : "Failed to load runtime controls");
+      }
       setRuntimeModels([]);
       setRuntimeAgents([]);
       setSelectedModel(null);
       setSelectedAgent(null);
     } finally {
-      setRuntimeLoading(false);
+      if (!silent) {
+        setRuntimeLoading(false);
+      }
     }
   }
+
+  async function handleReloadRuntime() {
+    if (!activeProjectId) return;
+    if (reloadMessageTimeoutRef.current !== null) {
+      window.clearTimeout(reloadMessageTimeoutRef.current);
+      reloadMessageTimeoutRef.current = null;
+    }
+    setReloading(true);
+    setReloadMessage(null);
+    try {
+      await loadProjectRuntime(activeProjectId);
+      setReloadMessage("Config reloaded ✓");
+    } catch {
+      setReloadMessage("Reload failed");
+    } finally {
+      setReloading(false);
+      reloadMessageTimeoutRef.current = window.setTimeout(() => {
+        setReloadMessage(null);
+        reloadMessageTimeoutRef.current = null;
+      }, 3000);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (reloadMessageTimeoutRef.current !== null) {
+        window.clearTimeout(reloadMessageTimeoutRef.current);
+      }
+    };
+  }, []);
 
   function updateProjectSessionSelection(projectId: string, sessionId: string | null) {
     setProjects((current) =>
@@ -2736,6 +2777,32 @@ async function loadDiff(projectId: string) {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [isAuthenticated, activeProjectId, SESSION_LIST_REFRESH_MS]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !activeProjectId) {
+      return;
+    }
+
+    const refreshModels = () => {
+      void loadProjectRuntime(activeProjectId, { silent: true });
+    };
+
+    const intervalId = window.setInterval(refreshModels, MODEL_LIST_REFRESH_MS);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshModels();
+      }
+    };
+
+    window.addEventListener("focus", refreshModels);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshModels);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [isAuthenticated, activeProjectId, MODEL_LIST_REFRESH_MS]);
 
   useEffect(() => {
     if (!activeProjectId && activeMainView !== "chat") {
@@ -3864,7 +3931,7 @@ async function loadDiff(projectId: string) {
     anchor.href = url;
     anchor.download = `project-telemetry-${timestamp}.json`;
     anchor.click();
-    URL.revokeObjectURL(url);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   function handleResetTelemetryCounters() {
@@ -4169,14 +4236,7 @@ async function loadDiff(projectId: string) {
         aria-orientation="vertical"
         aria-label="Resize projects sidebar"
         aria-valuemin={300}
-        aria-valuemax={(() => {
-          const minSidebarWidth = 300;
-          const minChatWidth = 420;
-          const shellWidth = shellRef.current?.getBoundingClientRect().width;
-          return shellWidth == null
-            ? 680
-            : Math.max(minSidebarWidth, Math.min(680, shellWidth - minChatWidth - 8));
-        })()}
+        aria-valuemax={680}
         aria-valuenow={Math.round(desktopSidebarWidth)}
         tabIndex={isMobileViewport ? -1 : 0}
         onPointerDown={(event) => {
@@ -4224,6 +4284,7 @@ async function loadDiff(projectId: string) {
             <button
               type="button"
               className="mobile-menu-button mobile-back-button"
+              aria-label="Back to projects"
               onClick={() => setMobileProjectListOpen(true)}
             >
               ←
@@ -4324,6 +4385,7 @@ async function loadDiff(projectId: string) {
               <button
                 type="button"
                 className="mobile-menu-button"
+                aria-label="Open settings"
                 onClick={() => setMobileSettingsOpen(true)}
               >
                 ⋮
@@ -4408,6 +4470,9 @@ async function loadDiff(projectId: string) {
                       sessionSwitching={sessionSwitching}
                       compacting={compacting}
                       error={runtimeError}
+                      reloading={reloading}
+                      reloadMessage={reloadMessage}
+                      onReload={handleReloadRuntime}
                       onModelChange={(value) => {
                         void saveProjectRuntimeSelection({ model: value, agent: selectedAgent });
                       }}
@@ -4427,7 +4492,7 @@ async function loadDiff(projectId: string) {
                         void handleCompactSession();
                       }}
                     />
-                </div>
+                  </div>
 
                 <div className="toolbar-card settings-card">
                   <div className="toolbar-card-head">
@@ -4901,26 +4966,29 @@ async function loadDiff(projectId: string) {
                      sessionLoading={sessionLoading}
                      sessionSwitching={sessionSwitching}
                      compacting={compacting}
-                     error={runtimeError}
-                     onModelChange={(value) => {
-                       void saveProjectRuntimeSelection({ model: value, agent: selectedAgent });
-                     }}
-                     onAgentChange={(value) => {
-                       void saveProjectRuntimeSelection({ model: selectedModel, agent: value });
-                     }}
-                     onSessionChange={(value) => {
-                       void handleSwitchSession(value);
-                     }}
-                     onSessionCreate={() => {
-                       void handleCreateSession();
-                     }}
-                     onSessionDelete={() => {
-                       void handleDeleteSession();
-                     }}
-                     onCompact={() => {
-                       void handleCompactSession();
-                     }}
-                   />
+                      error={runtimeError}
+                      reloading={reloading}
+                      reloadMessage={reloadMessage}
+                      onReload={handleReloadRuntime}
+                      onModelChange={(value) => {
+                        void saveProjectRuntimeSelection({ model: value, agent: selectedAgent });
+                      }}
+                      onAgentChange={(value) => {
+                        void saveProjectRuntimeSelection({ model: selectedModel, agent: value });
+                      }}
+                      onSessionChange={(value) => {
+                        void handleSwitchSession(value);
+                      }}
+                      onSessionCreate={() => {
+                        void handleCreateSession();
+                      }}
+                      onSessionDelete={() => {
+                        void handleDeleteSession();
+                      }}
+                      onCompact={() => {
+                        void handleCompactSession();
+                      }}
+                    />
                  </div>
                <div className="toolbar-card settings-card">
                  <div className="toolbar-card-head">
@@ -4990,6 +5058,7 @@ async function loadDiff(projectId: string) {
             onClick={() => setCommandPickerOpen(true)}
             disabled={availableCommands.length === 0 || hasActiveRun}
             title="Browse available server commands"
+            aria-label="Browse available server commands"
           >
             /
           </button>

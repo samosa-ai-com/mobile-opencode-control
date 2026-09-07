@@ -33,6 +33,9 @@ venv/
 env/
 .env
 backend/data/*.db
+backend/data/*.db-journal
+backend/data/*.db-wal
+backend/data/*.db-shm
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

@@ -10,17 +10,26 @@
 
 ## Dev Commands
 
-- **Backend**: `source .venv/bin/activate && python backend/run.py`
+- **Backend (dev)**: `source .venv/bin/activate && FLASK_DEBUG=1 python backend/run.py`
+- **Backend (prod)**: `source .venv/bin/activate && python backend/run.py` (uses gunicorn + gevent)
 - **Frontend**: `npm --prefix frontend run dev`
 - **OpenCode server**: `opencode serve --hostname 127.0.0.1 --port 4096 --cors http://localhost:5173`
+
+## Production Server
+
+Backend runs via **gunicorn** with **gevent** worker (1 worker, greenlet-based concurrency).
+SSE long-polling uses lightweight greenlets instead of waitress threads to prevent thread pool exhaustion on client disconnect.
+
+- Config: `gunicorn -k gevent -w 1 --bind 0.0.0.0:$BACKEND_PORT`
+- Backend listens on port 38473 (configurable via `BACKEND_PORT`)
 
 ## Service Order (required)
 
 1. OpenCode server first (needs available port)
-2. Backend (Flask on localhost:8080)
+2. Backend (gunicorn on localhost:38473)
 3. Frontend (Vite on localhost:5173)
 
-Backend `/api/health` checks OpenCode proxy - if OpenCode isn't running, health check fails.
+Backend `/api/health` returns liveness only (does not probe OpenCode). Use `/api/opencode/health` to check the OpenCode proxy - it returns 502 when OpenCode is down.
 
 ## Env Setup
 
@@ -30,7 +39,7 @@ cp .env.example .env
 
 ## Key Paths
 
-- Frontend proxied API: `/api` → `http://localhost:8080`
+- Frontend proxied API: `/api` → `http://localhost:${BACKEND_PORT:-38473}`
 - SQLite DB: `backend/data/app.db`
 - OpenCode runtime metadata: `.runtime/opencode.port`, `.runtime/opencode.url`
 
