@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg-app: #0e1621;
   --bg-sidebar: #17212b;
   --bg-main: #101a26;
@@ -3914,6 +3915,7 @@ input {
     inset: 0;
     z-index: 30;
     grid-template-rows: auto auto auto minmax(0, 1fr);
+    min-height: 100vh;
     min-height: 100dvh;
     background: linear-gradient(180deg, #0f1923 0%, #09101a 100%);
     padding: 0.85rem 0.85rem calc(1rem + env(safe-area-inset-bottom));
@@ -3968,7 +3970,7 @@ input {
 
 .agent-activity-summary strong {
   font-size: 0.82rem;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.01em;
   color: var(--text-main);
 }
@@ -4028,6 +4030,7 @@ input {
     inset: 0;
     z-index: 40;
     flex-direction: column;
+    min-height: 100vh;
     min-height: 100dvh;
     background:
       radial-gradient(circle at top, rgba(79, 134, 197, 0.16), transparent 28%),
@@ -4298,6 +4301,7 @@ input {
 
   .chat-pane {
     display: none;
+    min-height: 100vh;
     min-height: 100dvh;
     grid-template-rows: auto auto minmax(0, 1fr) auto;
     background: #101922;
@@ -4726,6 +4730,7 @@ input {
     display: none;
     position: fixed;
     inset: 0;
+    height: 100vh;
     height: 100dvh;
     z-index: 45;
     grid-template-rows: auto minmax(0, 1fr);
@@ -5152,5 +5157,16 @@ input {
     min-width: 4.2rem;
     padding: 0 0.5rem;
     font-size: 0.68rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
