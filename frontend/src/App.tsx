@@ -242,6 +242,7 @@ const [gitDiffEntries, setGitDiffEntries] = useState<GitDiffEntry[]>([]);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [reloading, setReloading] = useState(false);
   const [reloadMessage, setReloadMessage] = useState<string | null>(null);
+  const reloadMessageTimeoutRef = useRef<number | null>(null);
   const [projectSessions, setProjectSessions] = useState<ProjectSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
@@ -2024,6 +2025,10 @@ async function loadDiff(projectId: string) {
 
   async function handleReloadRuntime() {
     if (!activeProjectId) return;
+    if (reloadMessageTimeoutRef.current !== null) {
+      window.clearTimeout(reloadMessageTimeoutRef.current);
+      reloadMessageTimeoutRef.current = null;
+    }
     setReloading(true);
     setReloadMessage(null);
     try {
@@ -2033,9 +2038,20 @@ async function loadDiff(projectId: string) {
       setReloadMessage("Reload failed");
     } finally {
       setReloading(false);
-      setTimeout(() => setReloadMessage(null), 3000);
+      reloadMessageTimeoutRef.current = window.setTimeout(() => {
+        setReloadMessage(null);
+        reloadMessageTimeoutRef.current = null;
+      }, 3000);
     }
   }
+
+  useEffect(() => {
+    return () => {
+      if (reloadMessageTimeoutRef.current !== null) {
+        window.clearTimeout(reloadMessageTimeoutRef.current);
+      }
+    };
+  }, []);
 
   function updateProjectSessionSelection(projectId: string, sessionId: string | null) {
     setProjects((current) =>
@@ -4453,32 +4469,32 @@ async function loadDiff(projectId: string) {
                       sessionLoading={sessionLoading}
                       sessionSwitching={sessionSwitching}
                       compacting={compacting}
-                       error={runtimeError}
-                       reloading={reloading}
-                       reloadMessage={reloadMessage}
-                       onReload={handleReloadRuntime}
-                       onModelChange={(value) => {
-                         void saveProjectRuntimeSelection({ model: value, agent: selectedAgent });
-                       }}
-                       onAgentChange={(value) => {
-                         void saveProjectRuntimeSelection({ model: selectedModel, agent: value });
-                       }}
-                       onSessionChange={(value) => {
-                         void handleSwitchSession(value);
-                       }}
-                       onSessionCreate={() => {
-                         void handleCreateSession();
-                       }}
-                       onSessionDelete={() => {
-                         void handleDeleteSession();
-                       }}
-                       onCompact={() => {
-                         void handleCompactSession();
-                       }}
-                     />
-                 </div>
+                      error={runtimeError}
+                      reloading={reloading}
+                      reloadMessage={reloadMessage}
+                      onReload={handleReloadRuntime}
+                      onModelChange={(value) => {
+                        void saveProjectRuntimeSelection({ model: value, agent: selectedAgent });
+                      }}
+                      onAgentChange={(value) => {
+                        void saveProjectRuntimeSelection({ model: selectedModel, agent: value });
+                      }}
+                      onSessionChange={(value) => {
+                        void handleSwitchSession(value);
+                      }}
+                      onSessionCreate={() => {
+                        void handleCreateSession();
+                      }}
+                      onSessionDelete={() => {
+                        void handleDeleteSession();
+                      }}
+                      onCompact={() => {
+                        void handleCompactSession();
+                      }}
+                    />
+                  </div>
 
-                 <div className="toolbar-card settings-card">
+                <div className="toolbar-card settings-card">
                   <div className="toolbar-card-head">
                     <strong>Settings</strong>
                     <span>Default model and notifications</span>

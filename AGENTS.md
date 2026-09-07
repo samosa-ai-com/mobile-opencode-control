@@ -29,7 +29,7 @@ SSE long-polling uses lightweight greenlets instead of waitress threads to preve
 2. Backend (gunicorn on localhost:38473)
 3. Frontend (Vite on localhost:5173)
 
-Backend `/api/health` checks OpenCode proxy - if OpenCode isn't running, health check fails.
+Backend `/api/health` returns liveness only (does not probe OpenCode). Use `/api/opencode/health` to check the OpenCode proxy - it returns 502 when OpenCode is down.
 
 ## Env Setup
 
@@ -39,7 +39,7 @@ cp .env.example .env
 
 ## Key Paths
 
-- Frontend proxied API: `/api` → `http://localhost:8080`
+- Frontend proxied API: `/api` → `http://localhost:${BACKEND_PORT:-38473}`
 - SQLite DB: `backend/data/app.db`
 - OpenCode runtime metadata: `.runtime/opencode.port`, `.runtime/opencode.url`
 

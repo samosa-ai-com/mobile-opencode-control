@@ -118,17 +118,18 @@ wait_for_opencode() {
   return 1
 }
 
-# ─── 1. Resolve frontend port first (needed by OpenCode CORS and backend) ───
-if $FRONTEND_USE_SYSTEMD; then
-  FRONTEND_PORT="$(cat "$FRONTEND_PORT_FILE" 2>/dev/null || echo "${FRONTEND_APP_PORT:-5173}")"
-else
-  FRONTEND_PORT="$(pick_port "${FRONTEND_APP_PORT:-5173}")"
-fi
+# ─── 0. Load .env first so *_APP_PORT overrides apply to port picking ───
 if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
   source "$ROOT_DIR/.env"
   set +a
+fi
+# ─── 1. Resolve frontend port first (needed by OpenCode CORS and backend) ───
+if $FRONTEND_USE_SYSTEMD; then
+  FRONTEND_PORT="$(cat "$FRONTEND_PORT_FILE" 2>/dev/null || echo "${FRONTEND_APP_PORT:-5173}")"
+else
+  FRONTEND_PORT="$(pick_port "${FRONTEND_APP_PORT:-5173}")"
 fi
 FRONTEND_ALLOWED_HOSTS="${FRONTEND_ALLOWED_HOSTS:-localhost,127.0.0.1}"
 FRONTEND_ORIGINS="${FRONTEND_ORIGINS:-http://localhost:${FRONTEND_PORT}}"

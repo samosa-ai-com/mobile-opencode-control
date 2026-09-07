@@ -1,9 +1,12 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const env = loadEnv("", new URL("..", import.meta.url).pathname, "");
-const backendPort = env.BACKEND_PORT || "38473";
-const allowedHosts = (env.VITE_ALLOWED_HOSTS || env.FRONTEND_ALLOWED_HOSTS || "localhost,127.0.0.1")
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const env = loadEnv("", repoRoot, "");
+const backendPort = env.BACKEND_PORT || process.env.BACKEND_PORT || "38473";
+const allowedHosts = (env.VITE_ALLOWED_HOSTS || env.FRONTEND_ALLOWED_HOSTS || process.env.VITE_ALLOWED_HOSTS || process.env.FRONTEND_ALLOWED_HOSTS || "localhost,127.0.0.1")
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
